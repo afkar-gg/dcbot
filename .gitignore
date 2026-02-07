@@ -8,8 +8,7 @@ node_modules/
 *.log
 
 # runtime data
-# keep config example in repo if you want
-# data/config.json
+data/config.json
 
 # os
 .DS_Store
