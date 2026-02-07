@@ -125,6 +125,15 @@ function stripModelThinking(text) {
   return out.trim();
 }
 
+function safeReply(message, { content, allowedMentions } = {}) {
+  if (!message) return Promise.resolve(null);
+  // Try replying to the triggering message first; if that fails, fall back to sending in channel.
+  return message
+    .reply({ content, allowedMentions })
+    .catch(() => message.channel?.send?.({ content, allowedMentions }))
+    .catch(() => null);
+}
+
 function withTimeout(promise, timeoutMs, timeoutMessage = 'Timed out') {
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {
@@ -713,12 +722,10 @@ function createBot() {
       );
     } catch (e) {
       console.error('AI error:', e);
-      await message
-        .reply({
-          content: 'my bad ai is taking too long try again in a sec',
-          allowedMentions: allowedMentionsSafe(),
-        })
-        .catch(() => {});
+      await safeReply(message, {
+        content: 'my bad ai is taking too long try again in a sec',
+        allowedMentions: allowedMentionsSafe(),
+      });
       return;
     } finally {
       stopTyping();
@@ -727,12 +734,10 @@ function createBot() {
 
     aiText = stripModelThinking(aiText);
     if (!aiText) {
-      await message
-        .reply({
-          content: "i blanked lol say it again",
-          allowedMentions: allowedMentionsSafe(),
-        })
-        .catch(() => {});
+      await safeReply(message, {
+        content: "i blanked lol say it again",
+        allowedMentions: allowedMentionsSafe(),
+      });
       return;
     }
 
@@ -757,19 +762,15 @@ function createBot() {
     if (sendRes.reviewed && !sendRes.sent) {
       // If it's blocked because no log channel, tell user. If review is pending, also tell user.
       if (sendRes.error) {
-        await message
-          .reply({
-            content: `cant send that rn ${sendRes.error}`,
-            allowedMentions: allowedMentionsSafe(),
-          })
-          .catch(() => {});
+        await safeReply(message, {
+          content: `cant send that rn ${sendRes.error}`,
+          allowedMentions: allowedMentionsSafe(),
+        });
       } else {
-        await message
-          .reply({
-            content: 'mods gotta ok that first its in the log channel',
-            allowedMentions: allowedMentionsSafe(),
-          })
-          .catch(() => {});
+        await safeReply(message, {
+          content: 'mods gotta ok that first its in the log channel',
+          allowedMentions: allowedMentionsSafe(),
+        });
       }
     }
 
@@ -811,12 +812,10 @@ function createBot() {
           entry.nudged = true;
           aiInFlight.set(messageId, entry);
 
-          await msg
-            .reply({
-              content: 'gimme a sec…',
-              allowedMentions: allowedMentionsSafe(),
-            })
-            .catch(() => {});
+          await safeReply(msg, {
+            content: 'gimme a sec…',
+            allowedMentions: allowedMentionsSafe(),
+          });
         }
 
         // Cleanup very old entries (shouldn't happen due to timeout, but just in case)
