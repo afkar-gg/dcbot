@@ -250,6 +250,17 @@ function allowedMentionsAiSafe() {
   };
 }
 
+function allowedMentionsAiReplyPing() {
+  // For AI chatbot replies: ping ONLY the user being replied to.
+  // Still blocks @everyone/@here/roles/user mentions inside content.
+  return {
+    parse: [],
+    roles: [],
+    users: [],
+    repliedUser: true,
+  };
+}
+
 function containsSelfHarm(text) {
   const t = (text || '').toLowerCase();
   return (
@@ -793,7 +804,7 @@ function createBot() {
       replyToMessageId: message.id,
       content: aiText,
       source: 'ai',
-      allowedMentions: allowedMentionsAiSafe(),
+      allowedMentions: allowedMentionsAiReplyPing(),
       noMentionsOnApprove: true,
     });
 
