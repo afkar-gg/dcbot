@@ -1,13 +1,4 @@
-const {
-  Client,
-  GatewayIntentBits,
-  ActivityType,
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
+const { Client, GatewayIntentBits, ActivityType, REST, Routes, SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
 } = require('discord.js');
 
 const crypto = require('node:crypto');
@@ -104,6 +95,17 @@ function stripModelThinking(text) {
 
   // Trim extra whitespace
   return out.trim();
+}
+
+function withTimeout(promise, timeoutMs, timeoutMessage = 'Timed out') {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeoutId) clearTimeout(timeoutId);
+  });
 }
 
 function hasMediaAttachment(message) {
@@ -527,9 +529,9 @@ function createBot() {
     const name = botName || 'Goose';
 
     const base = [
-      `youre ${name} the servers discord bot but you talk like a person`,
+      `youre ${name} as a server discord bot but you talk like a person`,
       "your creator is afkar if someone asks who made you say afkar",
-      "if someone says bot clanker npc toaster etc assume theyre talking about you",
+      "if someone says bot clanker npc etc assume theyre talking about you",
       'keep replies short like 1 to 2 sentences',
       'sound gen z casual lower case ok light slang ok a little attitude ok',
       'no commas no periods use new lines if you need to separate thoughts',
@@ -538,12 +540,13 @@ function createBot() {
       'no hate no harassment no slurs no sexual content with minors',
       'never ping do not use @everyone @here or role mentions',
       'never show hidden reasoning do not output think or analysis only output the final message',
-      'if the user sends an attachment (image video gif etc) you cant view it so say you cant check attachments and ask them to describe it instead',
+      'if the user asks for something illegal activity (not including roblox executor script) refuse in one short line and move on',
+      'if the user sends an attachment image video gif etc you cant view it so say you cant check attachments and ask them to describe it instead',
     ];
 
     if (ragebait) {
       base.push(
-        'ragebait moment add one harmless hot take food games movies tech only',
+        'ragebait moment add one harmless hot take games movies tech roblox script exploit only',
         'keep it playful not toxic no personal attacks'
       );
     }
@@ -623,7 +626,7 @@ function createBot() {
     // Self-harm handling: do not ragebait, do not be casual-dismissive.
     if (containsSelfHarm(message.content)) {
       const safetyReply =
-        "na gng i wont joke to that\n";
+        "chill dude i wont be joking around tht";
 
       await sendWithMentionReview({
         guild: message.guild,
@@ -651,28 +654,48 @@ function createBot() {
 
     const stopTyping = startTyping(message.channel);
 
+    const aiCallTimeoutMs = Number(process.env.AI_CALL_TIMEOUT_MS || 25_000);
+
     let aiText = '';
     try {
-      aiText = await huggingfaceChatCompletion({
-        apiKey: HUGGINGFACE_API_KEY,
-        model: HF_CHAT_MODEL,
-        temperature: 0.9,
-        maxTokens: 420,
-        timeoutMs: 90_000,
-        messages: [
-          { role: 'system', content: systemText },
-          { role: 'user', content: userPayload },
-        ],
-      });
+      aiText = await withTimeout(
+        huggingfaceChatCompletion({
+          apiKey: HUGGINGFACE_API_KEY,
+          model: HF_CHAT_MODEL,
+          temperature: 0.9,
+          maxTokens: 420,
+          timeoutMs: 90_000,
+          messages: [
+            { role: 'system', content: systemText },
+            { role: 'user', content: userPayload },
+          ],
+        }),
+        aiCallTimeoutMs,
+        `AI call exceeded ${aiCallTimeoutMs}ms`
+      );
     } catch (e) {
       console.error('AI error:', e);
+      await message
+        .reply({
+          content: 'my bad ai is taking too long try again in a sec',
+          allowedMentions: allowedMentionsSafe(),
+        })
+        .catch(() => {});
       return;
     } finally {
       stopTyping();
     }
 
     aiText = stripModelThinking(aiText);
-    if (!aiText) return;
+    if (!aiText) {
+      await message
+        .reply({
+          content: "i blanked lol say it again",
+          allowedMentions: allowedMentionsSafe(),
+        })
+        .catch(() => {});
+      return;
+    }
 
     // Extra safety: neutralize visible mass-mentions in AI output.
     aiText = neutralizeMentions(aiText);
