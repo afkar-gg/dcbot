@@ -1,0 +1,15 @@
+{
+  "name": "dcbot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Discord bot with rotating rich presence and hybrid ping command",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.17.3",
+    "dotenv": "^16.4.5"
+  }
+}

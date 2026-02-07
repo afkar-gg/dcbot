@@ -1,0 +1,15 @@
+# deps
+node_modules/
+
+# env secrets
+.env
+
+# logs
+*.log
+
+# runtime data
+# keep config example in repo if you want
+# data/config.json
+
+# os
+.DS_Store

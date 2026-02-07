@@ -1,0 +1,28 @@
+{
+  "guilds": {
+    "1387021291898273842": {
+      "prefix": "s.",
+      "banChannelId": "1469131516402728960",
+      "logChannelId": "1469333467669205205",
+      "tempBans": []
+    },
+    "1469315560499056764": {
+      "prefix": "s.",
+      "banChannelId": null,
+      "logChannelId": "1469315933393653979",
+      "tempBans": []
+    },
+    "1441449707141337262": {
+      "prefix": "s.",
+      "banChannelId": null,
+      "logChannelId": null,
+      "tempBans": []
+    },
+    "1469396389925748932": {
+      "prefix": "s.",
+      "banChannelId": null,
+      "logChannelId": null,
+      "tempBans": []
+    }
+  }
+}
