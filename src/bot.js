@@ -24,6 +24,34 @@ const { neutralizeMentions } = require('./utils/sanitize');
 
 const EXEMPT_USER_ID = '777427217490903080';
 
+// Track in-flight AI responses so we can nudge the user if the model/provider is slow.
+// Keyed by triggering message id.
+const aiInFlight = new Map();
+
+const HOT_TAKES = [
+  'cats are better than dogs',
+  'fps games are overrated',
+  'most movie sequels are mid',
+  'android ui clears ios',
+  'dark mode 24/7 is cringe',
+  'chess is just math cosplay',
+  'energy drinks taste like battery acid',
+  'anime openings carry the whole show sometimes',
+  'vr is still not there yet',
+  'singleplayer > ranked grinding',
+  'controllers > keyboard for chill gaming',
+];
+
+const lastHotTakeByGuild = new Map();
+
+function pickHotTake(guildId) {
+  const last = lastHotTakeByGuild.get(guildId);
+  const choices = last ? HOT_TAKES.filter((t) => t !== last) : HOT_TAKES;
+  const take = choices[Math.floor(Math.random() * choices.length)] || HOT_TAKES[0];
+  lastHotTakeByGuild.set(guildId, take);
+  return take;
+}
+
 function buildHelpText(prefix) {
   return [
     '**Commands**',
@@ -523,7 +551,7 @@ function createBot() {
     });
   }
 
-  function buildAiSystemPrompt({ ragebait, botName }) {
+  function buildAiSystemPrompt({ ragebait, botName, hotTakeSeed }) {
     // Casual chat persona. Keep it fun, short, and NOT corporate.
     // IMPORTANT: you are THIS Discord bot account, just chatting casually.
     const name = botName || 'Goose';
@@ -547,6 +575,8 @@ function createBot() {
     if (ragebait) {
       base.push(
         'ragebait moment add one harmless hot take games movies tech roblox script exploit only',
+        'do not reuse the same hot take every time',
+        `use this specific hot take: "${hotTakeSeed || 'something random'}"`,
         'keep it playful not toxic no personal attacks'
       );
     }
@@ -650,11 +680,19 @@ function createBot() {
     const botName = pickBotNameFromDisplayName(botDisplayName);
 
     const ragebait = Math.random() < 0.08; // ~8% of the time
-    const systemText = buildAiSystemPrompt({ ragebait, botName });
+    const hotTakeSeed = ragebait ? pickHotTake(message.guild?.id) : '';
+    const systemText = buildAiSystemPrompt({ ragebait, botName, hotTakeSeed });
 
     const stopTyping = startTyping(message.channel);
 
     const aiCallTimeoutMs = Number(process.env.AI_CALL_TIMEOUT_MS || 25_000);
+
+    // Register in-flight request for watchdog nudges.
+    aiInFlight.set(message.id, {
+      message,
+      startedAt: Date.now(),
+      nudged: false,
+    });
 
     let aiText = '';
     try {
@@ -684,6 +722,7 @@ function createBot() {
       return;
     } finally {
       stopTyping();
+      aiInFlight.delete(message.id);
     }
 
     aiText = stripModelThinking(aiText);
@@ -755,6 +794,37 @@ function createBot() {
   // =====================
   client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
+
+    // Watchdog: every 7s, nudge users if an AI response is still running.
+    // This prevents "silent" feeling when providers stall.
+    setInterval(async () => {
+      const now = Date.now();
+      for (const [messageId, entry] of aiInFlight.entries()) {
+        const msg = entry?.message;
+        if (!msg || !msg.channel) {
+          aiInFlight.delete(messageId);
+          continue;
+        }
+
+        // Nudge once after 7s.
+        if (!entry.nudged && now - entry.startedAt >= 7000) {
+          entry.nudged = true;
+          aiInFlight.set(messageId, entry);
+
+          await msg
+            .reply({
+              content: 'gimme a sec…',
+              allowedMentions: allowedMentionsSafe(),
+            })
+            .catch(() => {});
+        }
+
+        // Cleanup very old entries (shouldn't happen due to timeout, but just in case)
+        if (now - entry.startedAt >= 2 * 60_000) {
+          aiInFlight.delete(messageId);
+        }
+      }
+    }, 7000);
 
     setNextPresence();
     setInterval(setNextPresence, 5000);
