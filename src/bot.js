@@ -705,11 +705,29 @@ function createBot() {
       ? ` (replied-to user: ${repliedWho}${repliedAuthorIsMod ? ' | moderator' : ''}${repliedAuthorIsBot ? ' | bot' : ''})`
       : '';
 
+    const guildName = stripControlChars(message.guild?.name || 'unknown');
+    const guildId = message.guild?.id || 'unknown';
+
+    // Best-effort owner info (may require additional intents/permissions in some guilds)
+    let ownerTag = '';
+    let ownerId = '';
+    try {
+      const owner = await message.guild.fetchOwner();
+      ownerTag = stripControlChars(owner?.user?.tag || owner?.user?.username || '');
+      ownerId = owner?.id || '';
+    } catch {
+      ownerId = message.guild?.ownerId || '';
+    }
+
+    const serverMetaLine =
+      `Server: ${guildName} (${guildId})` +
+      (ownerId ? ` | Owner: ${ownerTag ? ownerTag + ' ' : ''}(id ${ownerId})` : '');
+
     const userPayload = chainText
-      ? `Chat context\n\n${chainText}\n\nNew message from ${message.author.tag}${repliedMeta}: ${prompt}`
+      ? `Chat context\n\n${chainText}\n\n${serverMetaLine}\nNew message from ${message.author.tag}${repliedMeta}: ${prompt}`
       : repliedText
-        ? `User ${message.author.tag}${repliedMeta} replied: ${prompt}\n\nThey replied to this message: ${repliedText}`
-        : `User ${message.author.tag} said: ${prompt}`;
+        ? `${serverMetaLine}\nUser ${message.author.tag}${repliedMeta} replied: ${prompt}\n\nThey replied to this message: ${repliedText}`
+        : `${serverMetaLine}\nUser ${message.author.tag} said: ${prompt}`;
 
     // Self-harm handling: do not ragebait, do not be casual-dismissive.
     if (containsSelfHarm(message.content)) {
