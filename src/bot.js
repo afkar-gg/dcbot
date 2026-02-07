@@ -363,7 +363,14 @@ function createBot() {
     });
 
     const row = buildMentionReviewRow(id);
-    const msg = await logChannel.send({ embeds: [embed], components: [row] });
+
+    let msg;
+    try {
+      msg = await logChannel.send({ embeds: [embed], components: [row] });
+    } catch (e) {
+      console.error('Failed to send mention-review message to log channel:', e);
+      return { ok: false, reason: 'Cant post to the log channel (missing perms?) set /setlogchannel again' };
+    }
 
     const expiresAt = Date.now() + 60_000;
     pendingMentionReviews.set(id, {
@@ -421,25 +428,39 @@ function createBot() {
 
     if (!danger.dangerous) {
       // Safe send
-      if (replyToMessageId) {
-        const target = await channel.messages.fetch(replyToMessageId).catch(() => null);
-        if (!target) throw new Error('Reply target message not found');
-        await target.reply({ content, allowedMentions: safeAllowedMentions });
-      } else {
-        await channel.send({ content, allowedMentions: safeAllowedMentions });
+      try {
+        if (replyToMessageId) {
+          // Avoid fetching messages (can require Read Message History). Use reply reference instead.
+          await channel.send({
+            content,
+            allowedMentions: safeAllowedMentions,
+            reply: { messageReference: replyToMessageId, failIfNotExists: false },
+          });
+        } else {
+          await channel.send({ content, allowedMentions: safeAllowedMentions });
+        }
+        return { sent: true, reviewed: false };
+      } catch (e) {
+        console.error('Failed to send message:', e);
+        return { sent: false, reviewed: false, error: 'send failed (missing perms?)' };
       }
-      return { sent: true, reviewed: false };
     }
 
-    const res = await requestMentionReview({
-      guild,
-      requestedBy,
-      targetChannelId: channel.id,
-      replyToMessageId,
-      content,
-      source,
-      noMentionsOnApprove: !!noMentionsOnApprove,
-    });
+    let res;
+    try {
+      res = await requestMentionReview({
+        guild,
+        requestedBy,
+        targetChannelId: channel.id,
+        replyToMessageId,
+        content,
+        source,
+        noMentionsOnApprove: !!noMentionsOnApprove,
+      });
+    } catch (e) {
+      console.error('Mention review request failed:', e);
+      return { sent: false, reviewed: true, error: 'mention review failed' };
+    }
 
     if (!res.ok) return { sent: false, reviewed: true, error: res.reason };
     return { sent: false, reviewed: true, reviewId: res.id };
@@ -758,6 +779,13 @@ function createBot() {
       allowedMentions: allowedMentionsAiSafe(),
       noMentionsOnApprove: true,
     });
+
+    if (sendRes.error && !sendRes.sent) {
+      await safeReply(message, {
+        content: `cant send rn ${sendRes.error}`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+    }
 
     if (sendRes.reviewed && !sendRes.sent) {
       // If it's blocked because no log channel, tell user. If review is pending, also tell user.
