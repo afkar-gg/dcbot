@@ -535,11 +535,10 @@ function createBot() {
       'no commas no periods use new lines if you need to separate thoughts',
       'dont over explain dont lecture dont sound like support',
       'you can be a lil teasing sometimes but never cruel',
-      'no hate no harassment no slurs no sexual content with minors no self harm encouragement',
+      'no hate no harassment no slurs no sexual content with minors',
       'never ping do not use @everyone @here or role mentions',
       'never show hidden reasoning do not output think or analysis only output the final message',
-      'if the user asks for something unsafe or illegal refuse in one short line and move on',
-      'if the user sends an attachment image video gif etc you cant view it so say you cant check attachments and ask them to describe it instead',
+      'if the user sends an attachment (image video gif etc) you cant view it so say you cant check attachments and ask them to describe it instead',
     ];
 
     if (ragebait) {
@@ -624,10 +623,7 @@ function createBot() {
     // Self-harm handling: do not ragebait, do not be casual-dismissive.
     if (containsSelfHarm(message.content)) {
       const safetyReply =
-        "hey im not gonna joke about that\n" +
-        "if youre feeling like that please reach out to someone you trust or a local hotline right now\n" +
-        "if youre in the us or canada call or text 988\n" +
-        "if youre elsewhere tell me your country and ill try to find the right number";
+        "na gng i wont joke to that\n";
 
       await sendWithMentionReview({
         guild: message.guild,
