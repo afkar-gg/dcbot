@@ -125,12 +125,27 @@ function stripModelThinking(text) {
   return out.trim();
 }
 
+async function retry(fn, { retries = 2, delayMs = 750 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      return await fn(attempt);
+    } catch (e) {
+      lastErr = e;
+      if (attempt >= retries) break;
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
 function safeReply(message, { content, allowedMentions } = {}) {
   if (!message) return Promise.resolve(null);
   // Try replying to the triggering message first; if that fails, fall back to sending in channel.
-  return message
-    .reply({ content, allowedMentions })
-    .catch(() => message.channel?.send?.({ content, allowedMentions }))
+  return retry(() => message.reply({ content, allowedMentions }), { retries: 1, delayMs: 400 })
+    .catch(() => retry(() => message.channel?.send?.({ content, allowedMentions }), { retries: 1, delayMs: 400 }))
     .catch(() => null);
 }
 
@@ -429,16 +444,18 @@ function createBot() {
     if (!danger.dangerous) {
       // Safe send
       try {
-        if (replyToMessageId) {
-          // Avoid fetching messages (can require Read Message History). Use reply reference instead.
-          await channel.send({
-            content,
-            allowedMentions: safeAllowedMentions,
-            reply: { messageReference: replyToMessageId, failIfNotExists: false },
-          });
-        } else {
-          await channel.send({ content, allowedMentions: safeAllowedMentions });
-        }
+        await retry(async () => {
+          if (replyToMessageId) {
+            // Avoid fetching messages (can require Read Message History). Use reply reference instead.
+            await channel.send({
+              content,
+              allowedMentions: safeAllowedMentions,
+              reply: { messageReference: replyToMessageId, failIfNotExists: false },
+            });
+          } else {
+            await channel.send({ content, allowedMentions: safeAllowedMentions });
+          }
+        });
         return { sent: true, reviewed: false };
       } catch (e) {
         console.error('Failed to send message:', e);
