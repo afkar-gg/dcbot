@@ -24,6 +24,26 @@ const { neutralizeMentions } = require('./utils/sanitize');
 
 const EXEMPT_USER_ID = '777427217490903080';
 const CREATOR_USER_ID = '777427217490903080';
+const CREATOR_ALERT_CHANNEL_ID = '1387021963511468073';
+
+async function notifyCreatorLowCredits(client, { guild, keyMasked } = {}) {
+  try {
+    const channel = await client.channels.fetch(CREATOR_ALERT_CHANNEL_ID).catch(() => null);
+    if (!channel || !channel.isTextBased?.()) return;
+
+    const where = guild?.name ? `in ${guild.name}` : '';
+    const keyInfo = keyMasked ? ` (${keyMasked})` : '';
+
+    await channel
+      .send({
+        content: `<@${CREATOR_USER_ID}> ur api key ran out gng im dying${keyInfo} ${where}`.trim(),
+        allowedMentions: { parse: ['users'], users: [CREATOR_USER_ID], roles: [], repliedUser: false },
+      })
+      .catch(() => {});
+  } catch {
+    // ignore
+  }
+}
 
 function isCreator(userId) {
   return String(userId || '') === CREATOR_USER_ID;
@@ -868,7 +888,9 @@ function createBot() {
             const before = (config.hfApiKeys || []).length;
             config.hfApiKeys = (config.hfApiKeys || []).filter((k) => k !== key);
             saveConfig(config);
-            console.error(`Removed depleted HF key ${maskApiKey(key)} (${before} -> ${config.hfApiKeys.length})`);
+            const masked = maskApiKey(key);
+            console.error(`Removed depleted HF key ${masked} (${before} -> ${config.hfApiKeys.length})`);
+            await notifyCreatorLowCredits(client, { guild: message.guild, keyMasked: masked });
             continue;
           }
 
@@ -907,36 +929,52 @@ function createBot() {
     aiText = aiText.replace(/[,.]/g, '');
 
     // Reply to the user message
-    const sendRes = await sendWithMentionReview({
-      guild: message.guild,
-      requestedBy: message.author,
-      channel: message.channel,
-      replyToMessageId: message.id,
-      content: aiText,
-      source: 'ai',
-      allowedMentions: allowedMentionsAiReplyPing(),
-      noMentionsOnApprove: true,
-    });
+    const parts = aiText
+      .split(/\r?\n+/g)
+      .map((s) => String(s || '').trim())
+      .filter(Boolean);
 
-    if (sendRes.error && !sendRes.sent) {
-      await safeReply(message, {
-        content: `cant send rn ${sendRes.error}`,
-        allowedMentions: allowedMentionsSafe(),
+    const toSend = parts.length > 1 ? parts.slice(0, 6) : [aiText];
+
+    let lastSendRes = { sent: false, reviewed: false };
+    for (const part of toSend) {
+      // eslint-disable-next-line no-await-in-loop
+      lastSendRes = await sendWithMentionReview({
+        guild: message.guild,
+        requestedBy: message.author,
+        channel: message.channel,
+        replyToMessageId: message.id,
+        content: part,
+        source: 'ai',
+        allowedMentions: allowedMentionsAiReplyPing(),
+        noMentionsOnApprove: true,
       });
-    }
 
-    if (sendRes.reviewed && !sendRes.sent) {
-      // If it's blocked because no log channel, tell user. If review is pending, also tell user.
-      if (sendRes.error) {
+      if (lastSendRes.error && !lastSendRes.sent) {
+        // eslint-disable-next-line no-await-in-loop
         await safeReply(message, {
-          content: `cant send that rn ${sendRes.error}`,
+          content: `cant send rn ${lastSendRes.error}`,
           allowedMentions: allowedMentionsSafe(),
         });
-      } else {
-        await safeReply(message, {
-          content: 'mods gotta ok that first its in the log channel',
-          allowedMentions: allowedMentionsSafe(),
-        });
+        break;
+      }
+
+      if (lastSendRes.reviewed && !lastSendRes.sent) {
+        // If it's blocked because no log channel, tell user. If review is pending, also tell user.
+        if (lastSendRes.error) {
+          // eslint-disable-next-line no-await-in-loop
+          await safeReply(message, {
+            content: `cant send that rn ${lastSendRes.error}`,
+            allowedMentions: allowedMentionsSafe(),
+          });
+        } else {
+          // eslint-disable-next-line no-await-in-loop
+          await safeReply(message, {
+            content: 'mods gotta ok that first its in the log channel',
+            allowedMentions: allowedMentionsSafe(),
+          });
+        }
+        break;
       }
     }
 
