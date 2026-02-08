@@ -184,7 +184,7 @@ function hasMediaAttachment(message) {
   return false;
 }
 
-async function fetchReplyChain(message, maxDepth = 4) {
+async function fetchReplyChain(message, maxDepth = 8) {
   const chain = [];
   let current = message;
 
@@ -192,7 +192,12 @@ async function fetchReplyChain(message, maxDepth = 4) {
     const refId = current?.reference?.messageId;
     if (!refId) break;
 
-    const prev = await current.channel.messages.fetch(refId).catch(() => null);
+    // Prefer Discord.js helper when available.
+    // It handles cross-channel references more correctly than a plain fetch.
+    const prev = await (typeof current.fetchReference === 'function'
+      ? current.fetchReference().catch(() => null)
+      : current.channel.messages.fetch(refId).catch(() => null));
+
     if (!prev) break;
 
     chain.push(prev);
@@ -620,6 +625,7 @@ function createBot() {
       "if someone says bot clanker npc etc assume theyre talking about you",
       'keep replies short like 1 to 2 sentences',
       'sound gen z casual lower case ok light slang ok a little attitude ok',
+      'reply in the same language as the user and the chat context do not randomly switch to english',
       'no commas no periods use new lines if you need to separate thoughts',
       'dont over explain dont lecture dont sound like support',
       'you can be a lil teasing sometimes but never cruel',
@@ -671,16 +677,31 @@ function createBot() {
     }
 
     // Build prompt
-    const botMention = client.user ? `<@${client.user.id}>` : '';
-    let prompt = (message.content || '').replaceAll(botMention, '').trim();
+    const botMentionA = client.user ? `<@${client.user.id}>` : '';
+    const botMentionB = client.user ? `<@!${client.user.id}>` : '';
+    let prompt = (message.content || '')
+      .replaceAll(botMentionA, '')
+      .replaceAll(botMentionB, '')
+      .trim();
     if (!prompt) prompt = '(no text)';
 
     // Build deeper reply chain context
-    const chain = await fetchReplyChain(message, 5).catch(() => []);
+    const chain = await fetchReplyChain(message, 8).catch(() => []);
 
-    // If we already got a replied message via the trigger path, prefer it as the first hop
-    if (context.repliedText && chain.length === 0) {
-      // fallback keeps old behavior in edge cases
+    // If we already got a replied message via the trigger path, and chain fetch missed it,
+    // include it so the model knows exactly who was replied to.
+    if (context.repliedToMessageId && context.repliedText && chain.length === 0) {
+      chain.push({
+        author: {
+          id: context.repliedAuthorId,
+          tag: context.repliedAuthorTag,
+          bot: !!context.repliedAuthorIsBot,
+        },
+        content: context.repliedText,
+        attachments: { size: 0 },
+        stickers: { size: 0 },
+        embeds: [],
+      });
     }
 
     const chainText = chain.length
@@ -693,16 +714,17 @@ function createBot() {
 
     const repliedText = context.repliedText ? stripControlChars(String(context.repliedText)) : '';
     const repliedAuthorTag = context.repliedAuthorTag ? stripControlChars(String(context.repliedAuthorTag)) : '';
+    const repliedAuthorId = context.repliedAuthorId ? String(context.repliedAuthorId) : '';
     const repliedAuthorDisplayName = context.repliedAuthorDisplayName
       ? stripControlChars(String(context.repliedAuthorDisplayName))
       : '';
     const repliedAuthorIsMod = !!context.repliedAuthorIsMod;
     const repliedAuthorIsBot = !!context.repliedAuthorIsBot;
 
-    const repliedWho = repliedAuthorDisplayName || repliedAuthorTag || 'someone';
+    const repliedWho = repliedAuthorDisplayName || repliedAuthorTag || (repliedAuthorId ? `id ${repliedAuthorId}` : 'someone');
 
     const repliedMeta = repliedText
-      ? ` (replied-to user: ${repliedWho}${repliedAuthorIsMod ? ' | moderator' : ''}${repliedAuthorIsBot ? ' | bot' : ''})`
+      ? ` (replied-to user: ${repliedWho}${repliedAuthorId ? ` | ${repliedAuthorId}` : ''}${repliedAuthorIsMod ? ' | moderator' : ''}${repliedAuthorIsBot ? ' | bot' : ''})`
       : '';
 
     const guildName = stripControlChars(message.guild?.name || 'unknown');
@@ -961,7 +983,10 @@ function createBot() {
 
     let repliedMessage = null;
     if (message.reference?.messageId) {
-      repliedMessage = await message.channel.messages.fetch(message.reference.messageId).catch(() => null);
+      // Prefer fetchReference when available (more accurate)
+      repliedMessage = await (typeof message.fetchReference === 'function'
+        ? message.fetchReference().catch(() => null)
+        : message.channel.messages.fetch(message.reference.messageId).catch(() => null));
     }
 
     const isReplyToBot = !!(repliedMessage && client.user && repliedMessage.author.id === client.user.id);
@@ -983,7 +1008,9 @@ function createBot() {
 
       const context = repliedMessage
         ? {
+            repliedToMessageId: repliedMessage.id,
             repliedText: repliedMessage.content,
+            repliedAuthorId: repliedMessage.author?.id,
             repliedAuthorTag: repliedMessage.author?.tag,
             repliedAuthorDisplayName: repliedDisplayName,
             repliedAuthorIsMod: repliedIsMod,
