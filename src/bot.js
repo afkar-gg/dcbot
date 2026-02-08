@@ -929,10 +929,14 @@ function createBot() {
     aiText = aiText.replace(/[,.]/g, '');
 
     // Reply to the user message
-    const parts = aiText
-      .split(/\r?\n+/g)
-      .map((s) => String(s || '').trim())
-      .filter(Boolean);
+    const hasCodeBlock = /```[\s\S]*?```/m.test(aiText);
+
+    const parts = hasCodeBlock
+      ? [aiText]
+      : aiText
+          .split(/\r?\n+/g)
+          .map((s) => String(s || '').trim())
+          .filter(Boolean);
 
     const toSend = parts.length > 1 ? parts.slice(0, 6) : [aiText];
 
