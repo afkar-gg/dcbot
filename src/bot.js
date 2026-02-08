@@ -23,6 +23,33 @@ const { huggingfaceChatCompletion } = require('./services/huggingfaceService');
 const { neutralizeMentions } = require('./utils/sanitize');
 
 const EXEMPT_USER_ID = '777427217490903080';
+const CREATOR_USER_ID = '777427217490903080';
+
+function isCreator(userId) {
+  return String(userId || '') === CREATOR_USER_ID;
+}
+
+function pickRoast() {
+  const roasts = [
+    'nice try lil bro but thats not for you',
+    'u are NOT the dev relax',
+    'nope creator only go touch grass',
+    'ur not him',
+    'access denied who even are you',
+  ];
+  return roasts[Math.floor(Math.random() * roasts.length)];
+}
+
+function maskApiKey(key) {
+  const k = String(key || '').trim();
+  if (k.length <= 8) return `${k.slice(0, 2)}…${k.slice(-2)}`;
+  return `${k.slice(0, 4)}…${k.slice(-4)}`;
+}
+
+function isHfCreditDepletedError(err) {
+  const body = String(err?.body || err?.message || '').toLowerCase();
+  return body.includes('credit balance is depleted');
+}
 
 // Track in-flight AI responses so we can nudge the user if the model/provider is slow.
 // Keyed by triggering message id.
@@ -540,6 +567,16 @@ function createBot() {
   // Slash command builders
   const pingCommand = new SlashCommandBuilder().setName('ping').setDescription('Shows the bot latency.');
   const helpCommand = new SlashCommandBuilder().setName('help').setDescription('DMs you the bot command list.');
+
+  const addHfApiCommand = new SlashCommandBuilder()
+    .setName('addhfapi')
+    .setDescription('Add a HuggingFace API key (creator only).')
+    .addStringOption((opt) => opt.setName('key').setDescription('HuggingFace API key').setRequired(true));
+
+  const removeHfApiCommand = new SlashCommandBuilder()
+    .setName('removehfapi')
+    .setDescription('Remove a HuggingFace API key (creator only).')
+    .addStringOption((opt) => opt.setName('key').setDescription('Key to remove (full key or masked prefix)').setRequired(true));
   const setBanChannelCommand = new SlashCommandBuilder()
     .setName('setbanchannel')
     .setDescription('Set this channel as ban channel (msg => delete 24h + ban; exempt user ignored).');
@@ -602,6 +639,8 @@ function createBot() {
       body: [
         pingCommand.toJSON(),
         helpCommand.toJSON(),
+        addHfApiCommand.toJSON(),
+        removeHfApiCommand.toJSON(),
         setBanChannelCommand.toJSON(),
         setPrefixCommand.toJSON(),
         setLogChannelCommand.toJSON(),
@@ -649,7 +688,10 @@ function createBot() {
   }
 
   async function handleAiChat(message, context = {}) {
-    if (!HUGGINGFACE_API_KEY) return;
+    // Allow either env var key or a managed key list.
+    // If both exist, we prefer the managed list.
+    const hfKeys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys.filter(Boolean) : [];
+    if (!HUGGINGFACE_API_KEY && hfKeys.length === 0) return;
     if (!message.guild || !message.channel?.isTextBased?.()) return;
 
     // Avoid responding to commands
@@ -794,25 +836,53 @@ function createBot() {
 
     let aiText = '';
     try {
-      aiText = await withTimeout(
-        huggingfaceChatCompletion({
-          apiKey: HUGGINGFACE_API_KEY,
-          model: HF_CHAT_MODEL,
-          temperature: 0.9,
-          maxTokens: 420,
-          timeoutMs: 90_000,
-          messages: [
-            { role: 'system', content: systemText },
-            { role: 'user', content: userPayload },
-          ],
-        }),
-        aiCallTimeoutMs,
-        `AI call exceeded ${aiCallTimeoutMs}ms`
-      );
+      const keyPool = hfKeys.length > 0 ? hfKeys : [HUGGINGFACE_API_KEY];
+      let lastErr = null;
+
+      for (const key of keyPool) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          aiText = await withTimeout(
+            huggingfaceChatCompletion({
+              apiKey: key,
+              model: HF_CHAT_MODEL,
+              temperature: 0.9,
+              maxTokens: 420,
+              timeoutMs: 90_000,
+              messages: [
+                { role: 'system', content: systemText },
+                { role: 'user', content: userPayload },
+              ],
+            }),
+            aiCallTimeoutMs,
+            `AI call exceeded ${aiCallTimeoutMs}ms`
+          );
+
+          lastErr = null;
+          break; // success
+        } catch (e) {
+          lastErr = e;
+
+          // Auto-remove depleted keys (only from managed list, never env var).
+          if (hfKeys.length > 0 && isHfCreditDepletedError(e)) {
+            const before = (config.hfApiKeys || []).length;
+            config.hfApiKeys = (config.hfApiKeys || []).filter((k) => k !== key);
+            saveConfig(config);
+            console.error(`Removed depleted HF key ${maskApiKey(key)} (${before} -> ${config.hfApiKeys.length})`);
+            continue;
+          }
+
+          // try next key
+        }
+      }
+
+      if (lastErr) throw lastErr;
     } catch (e) {
       console.error('AI error:', e);
       await safeReply(message, {
-        content: 'my bad ai is taking too long try again in a sec',
+        content: isHfCreditDepletedError(e)
+          ? 'hf credits cooked key got removed'
+          : 'my bad ai is taking too long try again in a sec',
         allowedMentions: allowedMentionsSafe(),
       });
       return;
@@ -1028,6 +1098,32 @@ function createBot() {
 
     const [rawCmd, ...args] = message.content.slice(prefix.length).trim().split(/\s+/);
     const cmd = (rawCmd || '').toLowerCase();
+
+    if (cmd === 'listapi') {
+      if (!isCreator(message.author.id)) {
+        await safeReply(message, {
+          content: pickRoast(),
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      const keys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys : [];
+      if (keys.length === 0) {
+        await safeReply(message, {
+          content: 'no hf keys saved',
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      const lines = keys.map((k, i) => `${i + 1}. ${maskApiKey(k)}`);
+      await safeReply(message, {
+        content: `hf keys:\n${lines.join('\n')}`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+      return;
+    }
 
     if (cmd === 'ping') {
       const sent = await message.channel.send('pinging');
@@ -1433,6 +1529,53 @@ function createBot() {
 
     const guildCfg = getGuildConfig(config, interaction.guildId);
     const prefix = guildCfg.prefix || DEFAULT_PREFIX;
+
+    if (interaction.commandName === 'addhfapi') {
+      if (!isCreator(interaction.user.id)) {
+        await interaction.reply({ content: pickRoast(), ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      const key = String(interaction.options.getString('key') || '').trim();
+      if (!key) {
+        await interaction.reply({ content: 'no key provided', ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      const keys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys : [];
+      if (!keys.includes(key)) keys.push(key);
+      config.hfApiKeys = keys;
+      saveConfig(config);
+
+      await interaction
+        .reply({ content: `added hf key ${maskApiKey(key)} (total ${keys.length})`, ephemeral: true })
+        .catch(() => {});
+      return;
+    }
+
+    if (interaction.commandName === 'removehfapi') {
+      if (!isCreator(interaction.user.id)) {
+        await interaction.reply({ content: pickRoast(), ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      const token = String(interaction.options.getString('key') || '').trim();
+      const keys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys : [];
+
+      const match = keys.find((k) => k === token) || keys.find((k) => maskApiKey(k) === token);
+      if (!match) {
+        await interaction.reply({ content: 'key not found', ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      config.hfApiKeys = keys.filter((k) => k !== match);
+      saveConfig(config);
+
+      await interaction
+        .reply({ content: `removed hf key ${maskApiKey(match)} (total ${config.hfApiKeys.length})`, ephemeral: true })
+        .catch(() => {});
+      return;
+    }
 
     if (interaction.commandName === 'ping') {
       const sent = await interaction.reply({ content: 'pinging', ephemeral: false, fetchReply: true });

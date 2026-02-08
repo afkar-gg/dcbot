@@ -13,18 +13,26 @@ function ensureDataDir() {
 function loadConfig() {
   ensureDataDir();
   if (!fs.existsSync(CONFIG_PATH)) {
-    const initial = { guilds: {} };
+    const initial = { guilds: {}, hfApiKeys: [] };
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(initial, null, 2));
     return initial;
   }
 
+  let cfg;
   try {
-    return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
   } catch {
-    const fallback = { guilds: {} };
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(fallback, null, 2));
-    return fallback;
+    cfg = { guilds: {} };
   }
+
+  // Root-level fields
+  if (!cfg || typeof cfg !== 'object') cfg = { guilds: {} };
+  if (!cfg.guilds || typeof cfg.guilds !== 'object') cfg.guilds = {};
+  if (!Array.isArray(cfg.hfApiKeys)) cfg.hfApiKeys = [];
+
+  // Persist any repairs
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+  return cfg;
 }
 
 function saveConfig(config) {
