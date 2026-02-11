@@ -13,7 +13,7 @@ function ensureDataDir() {
 function loadConfig() {
   ensureDataDir();
   if (!fs.existsSync(CONFIG_PATH)) {
-    const initial = { guilds: {}, hfApiKeys: [] };
+    const initial = { guilds: {}, hfApiKeys: [], globalLogChannelId: null };
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(initial, null, 2));
     return initial;
   }
@@ -29,6 +29,7 @@ function loadConfig() {
   if (!cfg || typeof cfg !== 'object') cfg = { guilds: {} };
   if (!cfg.guilds || typeof cfg.guilds !== 'object') cfg.guilds = {};
   if (!Array.isArray(cfg.hfApiKeys)) cfg.hfApiKeys = [];
+  if (typeof cfg.globalLogChannelId === 'undefined') cfg.globalLogChannelId = null;
 
   // Persist any repairs
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
@@ -46,6 +47,7 @@ function getGuildConfig(config, guildId) {
       prefix: DEFAULT_PREFIX,
       banChannelId: null,
       logChannelId: null,
+      allowAttachments: false,
       tempBans: [],
     };
     saveConfig(config);
@@ -64,6 +66,10 @@ function getGuildConfig(config, guildId) {
   }
   if (typeof g.logChannelId === 'undefined') {
     g.logChannelId = null;
+    changed = true;
+  }
+  if (typeof g.allowAttachments === 'undefined') {
+    g.allowAttachments = false;
     changed = true;
   }
   if (!Array.isArray(g.tempBans)) {

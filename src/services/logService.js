@@ -36,13 +36,36 @@ function buildModLogEmbed({
   return embed;
 }
 
-async function sendLogEmbed({ guild, config, getGuildConfig }, embed) {
+async function sendLogEmbed({ guild, config, getGuildConfig, client }, embed) {
   try {
     const guildCfg = getGuildConfig(config, guild.id);
-    if (!guildCfg.logChannelId) return;
-    const ch = await guild.channels.fetch(guildCfg.logChannelId).catch(() => null);
-    if (!ch || !ch.isTextBased()) return;
-    await ch.send({ embeds: [embed] });
+    const globalLogChannelId = config?.globalLogChannelId || null;
+
+    const hasGuildLog = !!guildCfg.logChannelId;
+    const hasGlobalLog = !!globalLogChannelId;
+    if (!hasGuildLog && !hasGlobalLog) return;
+
+    if (hasGuildLog) {
+      const ch = await guild.channels.fetch(guildCfg.logChannelId).catch(() => null);
+      if (ch && ch.isTextBased()) {
+        await ch.send({ embeds: [embed] }).catch(() => {});
+      }
+    }
+
+    if (hasGlobalLog && globalLogChannelId !== guildCfg.logChannelId) {
+      const globalChannel = client
+        ? await client.channels.fetch(globalLogChannelId).catch(() => null)
+        : await guild.channels.fetch(globalLogChannelId).catch(() => null);
+
+      if (globalChannel && globalChannel.isTextBased()) {
+        const globalEmbed = EmbedBuilder.from(embed).addFields({
+          name: 'Server',
+          value: `${guild?.name || 'Unknown'} (\`${guild.id}\`)`,
+          inline: false,
+        });
+        await globalChannel.send({ embeds: [globalEmbed] }).catch(() => {});
+      }
+    }
   } catch (e) {
     console.error('Failed to send log embed:', e);
   }
