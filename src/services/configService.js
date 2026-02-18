@@ -13,7 +13,7 @@ function ensureDataDir() {
 function loadConfig() {
   ensureDataDir();
   if (!fs.existsSync(CONFIG_PATH)) {
-    const initial = { guilds: {}, hfApiKeys: [], globalLogChannelId: null };
+    const initial = { guilds: {}, hfApiKeys: [], globalLogChannelId: null, aiBlacklistUserIds: [] };
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(initial, null, 2));
     return initial;
   }
@@ -30,6 +30,7 @@ function loadConfig() {
   if (!cfg.guilds || typeof cfg.guilds !== 'object') cfg.guilds = {};
   if (!Array.isArray(cfg.hfApiKeys)) cfg.hfApiKeys = [];
   if (typeof cfg.globalLogChannelId === 'undefined') cfg.globalLogChannelId = null;
+  if (!Array.isArray(cfg.aiBlacklistUserIds)) cfg.aiBlacklistUserIds = [];
 
   // Persist any repairs
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
@@ -49,6 +50,7 @@ function getGuildConfig(config, guildId) {
       logChannelId: null,
       allowAttachments: false,
       tempBans: [],
+      aiBlacklistUserIds: [],
     };
     saveConfig(config);
     return config.guilds[guildId];
@@ -74,6 +76,10 @@ function getGuildConfig(config, guildId) {
   }
   if (!Array.isArray(g.tempBans)) {
     g.tempBans = [];
+    changed = true;
+  }
+  if (!Array.isArray(g.aiBlacklistUserIds)) {
+    g.aiBlacklistUserIds = [];
     changed = true;
   }
 

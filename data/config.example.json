@@ -1,3 +1,7 @@
 {
-  "guilds": {}
+  "guilds": {},
+  "hfApiKeys": [],
+  "hfChatModel": "novita",
+  "globalLogChannelId": null,
+  "aiBlacklistUserIds": []
 }

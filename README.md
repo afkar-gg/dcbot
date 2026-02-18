@@ -53,8 +53,41 @@ Shows the bot latency.
 ### Help
 - `/help`
 - `s.help`
+- `s.help all` (includes creator-only commands)
+
+### AI Blacklist (mods)
+- `/blacklist action:<add|remove|list> user:<optional> userid:<optional>`
+- `s.blacklist <add|remove|list> <@user|id?>`
+
+Blocks a user from using the AI chatbot in that server.
 
 DMs you a list of available commands.
+
+### Loadstring Hosting
+- `s.loadstring <scriptName> [inlineScriptText]`
+- `s.ls <scriptName> [inlineScriptText]`
+- `/loadstring name:<scriptName> file:<optional> inline:<optional>`
+- `s.lslist` / `/lslist`
+- `s.lsremove <scriptName>` / `/lsremove name:<scriptName>`
+- `s.lsinfo <scriptName>` / `/lsinfo name:<scriptName>`
+
+Behavior:
+- Reads a script from:
+  1. file attachment on the command message,
+  2. file attachment on the replied message,
+  3. fallback inline script text after `<scriptName>`.
+- For `/loadstring`, when both `file` and `inline` are provided, the attachment is used.
+- Creates/updates a hosted raw script URL on `https://sc.afkar.lol/<username>/<scriptName>`.
+- Stores up to `15` loadstrings per user (new names above the limit are rejected).
+- Keeps up to `5` old versions per loadstring when content changes.
+- `lsinfo` sends details in DM (current URL, timestamps, size, and old-version links).
+- Old versions can be fetched via query hash (example: `https://sc.afkar.lol/<username>/<scriptName>?<hash>`).
+- Copy button returns raw snippet text (mobile copy friendly).
+
+### DM Support
+Commands that do not depend on server context can be used in DM:
+- Prefix: `s.ping`, `s.help`, `s.loadstring`, `s.ls`, `s.lslist`, `s.lsremove`, `s.lsinfo`
+- Slash: `/ping`, `/help`, `/loadstring`, `/lslist`, `/lsremove`, `/lsinfo`
 
 ### Set Ban Channel
 - `/setbanchannel`
@@ -82,5 +115,9 @@ Makes the bot send a message in the current channel.
 Changes the prefix for the current server.
 
 ## Notes
-- AI chatbot uses **Hugging Face Inference API**. Configure `HUGGINGFACE_API_KEY` in `.env`.
+- AI chatbot uses **Hugging Face Inference Providers (Router)**. Configure `HUGGINGFACE_API_KEY` in `config.json`.
+- You can switch chat routing/provider presets (creator-only) with: `s.sethfprovider <novita|together|fastest|preferred|cheapest|groq|fireworks|nscale|hf-inference>`.
+- AI chat is rate-limited per user (config keys: `AI_RATE_LIMIT_PER_MINUTE`, `AI_RATE_LIMIT_PING_ONLY_PER_MINUTE`).
+- Date/time answers use runtime clock context. Optional: set `BOT_TIMEZONE` (default `UTC`) and `BOT_TIME_LOCALE` (default `en-US`) in `config.json`.
 - Ban-channel enforcement uses Discord built-in ban message deletion.
+- Loadstring web host listens on `127.0.0.1:3006` by default (configurable with `LOADSTRING_WEB_PORT`).

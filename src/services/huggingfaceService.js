@@ -47,16 +47,30 @@ async function huggingfaceChatCompletion({
     // Provider suffixes can vary. Try a few common variants.
     const fallbacks = [
       model,
+
+      // Prefer router policies first (lets HF pick an available provider)
+      'moonshotai/Kimi-K2.5:fastest',
+      'moonshotai/Kimi-K2.5:preferred',
+      'moonshotai/Kimi-K2.5:cheapest',
+
+      // Known working provider-suffixed variants
       'moonshotai/Kimi-K2.5:novita',
       'moonshotai/Kimi-K2.5:novita-ai',
       'moonshotai/Kimi-K2.5:together',
       'moonshotai/Kimi-K2.5:together-ai',
       'moonshotai/Kimi-K2.5',
+
+      // Backup general model on multiple providers
+      'meta-llama/Llama-3.1-8B-Instruct:fastest',
+      'meta-llama/Llama-3.1-8B-Instruct:groq',
+      'meta-llama/Llama-3.1-8B-Instruct:fireworks-ai',
+      'meta-llama/Llama-3.1-8B-Instruct:nscale',
+
       // backup lightweight model (HF Inference provider)
       'HuggingFaceTB/SmolLM3-3B:hf-inference',
     ];
 
-    const shouldRetry = [400, 401, 403, 404, 422].includes(e?.status);
+    const shouldRetry = [400, 401, 403, 404, 422, 429, 500, 502, 503, 504].includes(e?.status);
     if (!shouldRetry) throw e;
 
     for (const m of fallbacks) {

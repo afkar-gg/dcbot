@@ -67,9 +67,54 @@ function formatDuration(ms) {
   return `${d}d`;
 }
 
+function buildCurrentDateTimeContext({ timeZone = 'UTC', locale = 'en-US' } = {}) {
+  const now = new Date();
+  const fallbackZone = 'UTC';
+  let zone = String(timeZone || '').trim() || fallbackZone;
+
+  const baseDateOptions = {
+    timeZone: zone,
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: '2-digit',
+  };
+
+  const baseTimeOptions = {
+    timeZone: zone,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZoneName: 'short',
+  };
+
+  let dateOnly;
+  let timeOnly;
+  try {
+    dateOnly = new Intl.DateTimeFormat(locale, baseDateOptions).format(now);
+    timeOnly = new Intl.DateTimeFormat(locale, baseTimeOptions).format(now);
+  } catch {
+    zone = fallbackZone;
+    dateOnly = new Intl.DateTimeFormat(locale, { ...baseDateOptions, timeZone: zone }).format(now);
+    timeOnly = new Intl.DateTimeFormat(locale, { ...baseTimeOptions, timeZone: zone }).format(now);
+  }
+
+  return {
+    isoUtc: now.toISOString(),
+    unixMs: now.getTime(),
+    unixSeconds: Math.floor(now.getTime() / 1000),
+    timeZone: zone,
+    dateOnly,
+    timeOnly,
+    localText: `${dateOnly} ${timeOnly}`,
+  };
+}
+
 module.exports = {
   parseDurationToMs,
   parseDurationToSeconds,
   normalizeBanDeleteSeconds,
   formatDuration,
+  buildCurrentDateTimeContext,
 };

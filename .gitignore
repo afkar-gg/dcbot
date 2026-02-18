@@ -3,12 +3,14 @@ node_modules/
 
 # env secrets
 .env
+config.json
 
 # logs
 *.log
 
 # runtime data
 data/config.json
+data/loadstrings/
 
 # os
 .DS_Store
