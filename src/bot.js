@@ -495,7 +495,9 @@ function looksLikeReasoningLeak(text) {
 function looksLikeGibberish(text) {
   const s = String(text || '');
   if (!s) return false;
-  if (s.length > 1200) return true;
+
+  // Length alone is not "gibberish" (we truncate later in sanitizeAiOutput).
+  // Blocking long but valid answers caused many false positives.
   if (/(.)\1{12,}/.test(s)) return true;
   if (/\d{20,}/.test(s)) return true;
   if (/(\b\w+\b)(?:\s+\1){4,}/i.test(s)) return true;
