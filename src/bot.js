@@ -470,7 +470,10 @@ function looksLikeReasoningLeak(text) {
   if (!lower) return false;
 
   // Explicit leakage markers
-  if (lower.includes('chain of thought') || /\b(?:reasoning|analysis)\b/.test(lower)) return true;
+  // Only treat as leakage when the model is *formatting* reasoning (headings / chain-of-thought),
+  // not when it casually uses words like "analysis" in a normal sentence.
+  if (lower.includes('chain of thought')) return true;
+  if (/(?:^|\n)\s*(?:reasoning|analysis|thoughts?)\s*:\s*/i.test(raw)) return true;
 
   // "here's what's happening" / narrating the situation tends to be the model thinking out loud
   if (/\b(?:here'?s|here is)\s+what'?s\s+happening\b/.test(lower)) return true;
@@ -484,7 +487,7 @@ function looksLikeReasoningLeak(text) {
 
   // Overly long multi-line "commentary" responses (common when it starts reasoning)
   const lineCount = raw.split(/\r?\n/).filter((l) => l.trim()).length;
-  if (lineCount >= 5 && raw.length > 450) return true;
+  if (lineCount >= 7 && raw.length > 650) return true;
 
   return false;
 }
