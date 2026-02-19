@@ -46,6 +46,20 @@ const {
   isExecutorQuestion,
   buildExecutorTrackerSummary,
 } = require('./services/weaoService');
+const { createReplyTargetTracker } = require('./ai/replyTargetTracker');
+const { detectAiTrigger } = require('./ai/triggerDetector');
+const { sendAiReplyGuaranteed } = require('./ai/replySender');
+const { createChatOrchestrator } = require('./ai/chatOrchestrator');
+const {
+  stripOutputControlChars,
+  stripZeroWidth,
+  stripModelThinking,
+  stripLeakedPromptLines,
+  looksLikePromptLeak,
+  looksLikeReasoningLeak,
+  sanitizeAiOutput,
+  collapseRepetitiveLines,
+} = require('./ai/outputGuard');
 const {
   DISCORD_TOKEN,
   HUGGINGFACE_API_KEY: RUNTIME_HUGGINGFACE_API_KEY,
@@ -70,6 +84,10 @@ const {
   AI_RANDOM_CONTEXT_MIN_KEEP,
   AI_RANDOM_CONTEXT_MAX_KEEP,
   AI_VISIBLE_CHANNEL_MAX_NAMES,
+  AI_REPLY_TRACKER_MAX_IDS,
+  AI_REPLY_TRACKER_TTL_MS,
+  AI_FALLBACK_REPLY_TEXT,
+  AI_FORCE_VISIBLE_REPLY,
 } = require('./services/runtimeConfig');
 
 const EXEMPT_USER_ID = '777427217490903080';
@@ -123,6 +141,9 @@ const MAX_RANDOM_CONTEXT_SCAN = AI_RANDOM_CONTEXT_SCAN;
 const MIN_RANDOM_CONTEXT_KEEP = AI_RANDOM_CONTEXT_MIN_KEEP;
 const MAX_RANDOM_CONTEXT_KEEP = AI_RANDOM_CONTEXT_MAX_KEEP;
 const MAX_VISIBLE_CHANNEL_NAMES = AI_VISIBLE_CHANNEL_MAX_NAMES;
+const MAX_REPLY_TRACKER_IDS = AI_REPLY_TRACKER_MAX_IDS;
+const REPLY_TRACKER_TTL_MS = AI_REPLY_TRACKER_TTL_MS;
+const FALLBACK_AI_REPLY_TEXT = String(AI_FALLBACK_REPLY_TEXT || 'i glitched lol say it again').trim() || 'i glitched lol say it again';
 
 async function pingCreatorInGlobalLog(client, config, { guild, text } = {}) {
   try {
@@ -253,6 +274,7 @@ function buildHelpText(prefix, { includeAll = false } = {}) {
   if (includeAll) {
     lines.push('');
     lines.push('**Creator-only**');
+    lines.push(`• \`${prefix}q <on|off|toggle|status>\` - raw ai mode (no personality/sanitize)`);
     lines.push(`• \`${prefix}addhfapi <key>\``);
     lines.push(`• \`${prefix}removehfapi <key|masked>\``);
     lines.push(`• \`${prefix}listapi\``);
@@ -273,12 +295,6 @@ function stripControlChars(text) {
   if (!text) return '';
   // Remove non-printable control chars + zero-width that can sneak into usernames/messages
   return stripZeroWidth(String(text).replace(/[\u0000-\u001F\u007F-\u009F]/g, '')).trim();
-}
-
-function stripOutputControlChars(text) {
-  if (!text) return '';
-  // Keep \n and \r for formatting, remove other control chars
-  return String(text).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
 }
 
 function parseChannelId(token) {
@@ -390,210 +406,6 @@ function startTyping(channel) {
   };
 }
 
-function stripModelThinking(text) {
-  if (!text) return '';
-  let out = String(text);
-
-  // Remove common chain-of-thought wrappers
-  out = out.replace(/<think>[\s\S]*?<\/think>/gi, '');
-  out = out.replace(/<analysis>[\s\S]*?<\/analysis>/gi, '');
-
-  // If the model outputs "Reasoning: ... Final: ...", keep only the Final/Answer section.
-  const finalMatch = out.match(
-    /(?:^|\n)\s*(?:final\s*answer|final|answer|response)\s*:\s*([\s\S]+)$/i
-  );
-  if (finalMatch) out = finalMatch[1];
-
-  // Some models prefix with "Thought:" style headings
-  out = out.replace(/^(?:thought|thinking|analysis|reasoning)\s*:\s*/i, '');
-
-  // Trim extra whitespace
-  return out.trim();
-}
-
-function stripZeroWidth(text) {
-  if (!text) return '';
-  return String(text).replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '');
-}
-
-function stripLeakedPromptLines(text) {
-  if (!text) return '';
-  const lines = String(text).split(/\r?\n/);
-  const filtered = [];
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const lower = trimmed.toLowerCase();
-
-    if (lower === 'chat context') continue;
-    if (lower === 'recent channel context') continue;
-    if (lower.startsWith('server:')) continue;
-    if (lower.startsWith('attachment:')) continue;
-    if (lower.startsWith('trigger:')) continue;
-    if (lower.startsWith('member facts:')) continue;
-    if (lower.startsWith('visible channels:')) continue;
-    if (lower.startsWith('new message from')) continue;
-    if (lower.startsWith('they replied to this message:')) continue;
-    if (lower.startsWith('replied-to user:')) continue;
-    if (lower.startsWith('owner:')) continue;
-    if (lower.startsWith('system:') || lower.startsWith('assistant:') || lower.startsWith('analysis:')) continue;
-    if (lower.startsWith('user ') && (lower.includes(' said:') || lower.includes(' replied:'))) continue;
-
-    filtered.push(trimmed);
-  }
-
-  return filtered.join('\n').trim();
-}
-
-function looksLikePromptLeak(text) {
-  const t = String(text || '');
-  if (!t) return false;
-  if (/chat context/i.test(t)) return true;
-  if (/recent channel context/i.test(t)) return true;
-  if (/(?:^|\s)server:\s*/i.test(t)) return true;
-  if (/(?:^|\s)attachment:\s*(yes|no)/i.test(t)) return true;
-  if (/(?:^|\s)trigger:\s*(direct|random)/i.test(t)) return true;
-  if (/member facts:/i.test(t)) return true;
-  if (/visible channels:/i.test(t)) return true;
-  if (/new message from/i.test(t)) return true;
-  if (/they replied to this message:/i.test(t)) return true;
-  if (/replied-to user:/i.test(t)) return true;
-  if (/owner:\s*/i.test(t)) return true;
-  if (/(?:^|\s)(system|assistant|analysis)\s*:/i.test(t)) return true;
-  return false;
-}
-
-function looksLikeReasoningLeak(text) {
-  const raw = String(text || '');
-  const lower = raw.toLowerCase();
-  if (!lower) return false;
-
-  // Explicit leakage markers
-  // Only treat as leakage when the model is *formatting* reasoning (headings / chain-of-thought),
-  // not when it casually uses words like "analysis" in a normal sentence.
-  if (lower.includes('chain of thought')) return true;
-  if (/(?:^|\n)\s*(?:reasoning|analysis|thoughts?)\s*:\s*/i.test(raw)) return true;
-
-  // "here's what's happening" / narrating the situation tends to be the model thinking out loud
-  if (/\b(?:here'?s|here is)\s+what'?s\s+happening\b/.test(lower)) return true;
-  if (/\b(?:i\s*(?:can\s*)?see)\s+(?:what'?s|whats)\s+(?:happening|going\s+on)\b/.test(lower)) return true;
-  if (/\b(?:let\s+me|lemme)\s+(?:break\s+it\s+down|explain|walk\s+through)\b/.test(lower)) return true;
-
-  // System/user/meta self-talk
-  const userMeta = /(the user|user is|user wants|user asked|user needs)/.test(lower);
-  const selfTalk = /(i need|i should|i will|i must|i cannot|i cant|as an ai)/.test(lower);
-  if (userMeta && selfTalk) return true;
-
-  // Overly long multi-line "commentary" responses (common when it starts reasoning)
-  const lineCount = raw.split(/\r?\n/).filter((l) => l.trim()).length;
-  if (lineCount >= 7 && raw.length > 650) return true;
-
-  return false;
-}
-
-function looksLikeGibberish(text) {
-  const s = String(text || '');
-  if (!s) return false;
-
-  // Length alone is not "gibberish" (we truncate later in sanitizeAiOutput).
-  // Blocking long but valid answers caused many false positives.
-  if (/(.)\1{12,}/.test(s)) return true;
-  if (/\d{20,}/.test(s)) return true;
-  if (/(\b\w+\b)(?:\s+\1){4,}/i.test(s)) return true;
-  if (/(\S{2,8})\1{3,}/.test(s)) return true;
-
-  const tokens = s.toLowerCase().split(/\s+/).filter(Boolean);
-  if (tokens.length >= 12) {
-    const uniq = new Set(tokens);
-    if (uniq.size / tokens.length < 0.35) return true;
-  }
-
-  return false;
-}
-
-function analyzeAiOutput(text) {
-  const cleaned = stripOutputControlChars(stripZeroWidth(String(text || '')));
-  const promptLeak = looksLikePromptLeak(cleaned);
-  const reasoningLeak = looksLikeReasoningLeak(cleaned);
-  const gibberish = looksLikeGibberish(cleaned);
-  const stripped = stripLeakedPromptLines(cleaned);
-  const emptyAfterStrip = !stripped;
-
-  const reasons = [];
-  if (promptLeak) reasons.push('prompt-leak');
-  if (reasoningLeak) reasons.push('reasoning');
-  if (gibberish) reasons.push('gibberish');
-  if (emptyAfterStrip) reasons.push('empty');
-
-  return {
-    cleaned,
-    stripped,
-    flags: { promptLeak, reasoningLeak, gibberish, emptyAfterStrip },
-    reasons,
-  };
-}
-
-function sanitizeAiOutput(text) {
-  if (!text) return { text: '', analysis: analyzeAiOutput('') };
-  const analysis = analyzeAiOutput(text);
-  let out = analysis.stripped;
-
-  if (!out) return { text: '', analysis };
-
-  const looksBad =
-    analysis.flags.promptLeak || analysis.flags.reasoningLeak || analysis.flags.gibberish;
-
-  if (looksBad || looksLikePromptLeak(out) || looksLikeReasoningLeak(out) || looksLikeGibberish(out)) {
-    return { text: '', analysis };
-  }
-
-  if (out.length > 800) out = out.slice(0, 800).trim();
-  return { text: out.trim(), analysis };
-}
-
-function isSpammyLine(line) {
-  const trimmed = String(line || '').trim();
-  if (!trimmed) return true;
-  const compact = trimmed.replace(/\s+/g, '');
-  if (compact.length <= 2) return true;
-  if (/^([a-z0-9])\1{3,}$/i.test(compact)) return true;
-  return false;
-}
-
-function collapseRepetitiveLines(lines) {
-  const cleaned = lines.map((line) => String(line || '').trim()).filter(Boolean);
-  if (cleaned.length <= 1) return cleaned;
-
-  const normalized = cleaned.map((line) =>
-    line
-      .toLowerCase()
-      .replace(/^\s*(?:[-*•]+|\d+[.)])\s*/, '')
-      .replace(/[`*_~]/g, '')
-      .replace(/[^a-z0-9\s:/.-]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-  );
-  const unique = new Set();
-  const deduped = [];
-
-  for (let i = 0; i < cleaned.length; i += 1) {
-    const key = normalized[i] || cleaned[i].toLowerCase();
-    if (!key) continue;
-    if (unique.has(key)) continue;
-    unique.add(key);
-    deduped.push(cleaned[i]);
-  }
-
-  const allSpammy = cleaned.every((line) => isSpammyLine(line));
-
-  if (deduped.length <= 1 || allSpammy) {
-    const first = deduped[0] || cleaned[0];
-    return isSpammyLine(first) ? ['nah'] : [first];
-  }
-
-  return deduped;
-}
 
 function chunkLines(lines, maxLen = 1800) {
   const chunks = [];
@@ -1538,6 +1350,37 @@ function createBot({ loadstringStore } = {}) {
   // Mention-review state (in-memory)
   const pendingMentionReviews = new Map();
   const pendingLoadstringCopies = new Map();
+  const replyTargetTracker = createReplyTargetTracker({
+    maxIds: MAX_REPLY_TRACKER_IDS,
+    ttlMs: REPLY_TRACKER_TTL_MS,
+  });
+
+  function trackBotMessage(msg, source = 'unknown') {
+    const id = msg?.id ? String(msg.id) : '';
+    if (!id) return;
+    replyTargetTracker.markBotMessageSent(id, { source });
+  }
+
+  async function safeReplyTracked(message, payload, source = 'safeReply') {
+    const sent = await safeReply(message, payload);
+    if (sent) {
+      trackBotMessage(sent, source);
+      return sent;
+    }
+
+    const content = String(payload?.content || '').trim();
+    if (!content || !message?.channel?.send) return null;
+
+    const plain = await message.channel
+      .send({
+        content: content.slice(0, 1800),
+        allowedMentions: payload?.allowedMentions || allowedMentionsSafe(),
+      })
+      .catch(() => null);
+
+    if (plain) trackBotMessage(plain, `${source}:plain-fallback`);
+    return plain;
+  }
 
   async function logLoadstringAction({
     guild,
@@ -2319,20 +2162,25 @@ function createBot({ loadstringStore } = {}) {
     if (!danger.dangerous) {
       // Safe send
       try {
+        let sentMessage = null;
         await retry(async () => {
           if (replyToMessageId) {
             // Avoid fetching messages (can require Read Message History). Use reply reference instead.
-            await channel.send({
+            sentMessage = await channel.send({
               content,
               allowedMentions: safeAllowedMentions,
               reply: { messageReference: replyToMessageId, failIfNotExists: false },
               files,
             });
           } else {
-            await channel.send({ content, allowedMentions: safeAllowedMentions, files });
+            sentMessage = await channel.send({ content, allowedMentions: safeAllowedMentions, files });
           }
         });
-        return { sent: true, reviewed: false };
+        return {
+          sent: true,
+          reviewed: false,
+          messageId: sentMessage?.id || null,
+        };
       } catch (e) {
         console.error('Failed to send message:', e);
         return { sent: false, reviewed: false, error: 'send failed (missing perms?)' };
@@ -2697,6 +2545,54 @@ function buildAiSystemPrompt({
     return base.join(' ');
   }
 
+function buildRawAiSystemPrompt({
+  currentDateTime,
+  allowAttachments = false,
+  editIntent = false,
+  hasWebResults = false,
+  hasExecutorTracker = false,
+}) {
+  const base = [
+    'you are a direct assistant in discord',
+    'no roleplay no personality',
+    'reply directly to the user request',
+    'keep it concise unless asked for detail',
+  ];
+
+  if (currentDateTime?.localText && currentDateTime?.isoUtc) {
+    base.push(
+      `current datetime in ${currentDateTime.timeZone} is ${currentDateTime.localText}`,
+      `current utc datetime is ${currentDateTime.isoUtc}`,
+      'if user asks date or time use this runtime context'
+    );
+  }
+
+  if (allowAttachments) {
+    base.push(
+      'if [attachment text: ...] appears you can use that text',
+      'if [attachment image: ...] appears you can use the caption'
+    );
+  } else {
+    base.push('if Attachment: yes and content is missing ask user to describe it');
+  }
+
+  if (editIntent) {
+    base.push(
+      'the user wants a file edit',
+      'reply with only the full updated file in a single code block'
+    );
+  }
+
+  if (hasWebResults) {
+    base.push('if web pages or search results are provided use them as primary context');
+  }
+  if (hasExecutorTracker) {
+    base.push('if executor tracker block is present use it as authoritative');
+  }
+
+  return base.join(' ');
+}
+
 function applyHfProvider(providerKey) {
   const key = String(providerKey || '').trim().toLowerCase();
   const model = HF_PROVIDER_PRESETS[key];
@@ -2768,6 +2664,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
 
     try {
       const allowAttachments = !!guildCfg.allowAttachments;
+      const aiRawMode = !!config.aiRawMode;
       const currentHasMedia = hasMediaAttachment(message);
       const currentDateTime = buildCurrentDateTimeContext({
         timeZone: BOT_TIMEZONE,
@@ -2858,20 +2755,38 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
         ? await buildAttachmentContext(message, { describeImage })
         : null;
 
-    if (currentHasMedia) {
-      if (!allowAttachments) {
-        const attachReply = 'cant check attachments btw describe it';
-
-        await sendWithMentionReview({
+    async function sendAiNotice(content, source = 'ai-notice') {
+      const sendOutcome = await sendAiReplyGuaranteed({
+        content,
+        fallbackText: FALLBACK_AI_REPLY_TEXT,
+        forceVisibleReply: AI_FORCE_VISIBLE_REPLY,
+        sendPrimary: (text) => sendWithMentionReview({
           guild: message.guild,
           requestedBy: message.author,
           channel: message.channel,
           replyToMessageId: message.id,
-          content: attachReply,
+          content: text,
           source: 'ai',
           allowedMentions: allowedMentionsAiReplyPing(),
           noMentionsOnApprove: true,
-        }).catch(() => {});
+        }),
+        sendFallback: (text) => safeReplyTracked(message, {
+          content: text,
+          allowedMentions: allowedMentionsSafe(),
+        }, source),
+      });
+
+      const primary = sendOutcome.primary || null;
+      if (primary?.sent && primary?.messageId) {
+        trackBotMessage({ id: primary.messageId }, source);
+      }
+      return sendOutcome;
+    }
+
+    if (currentHasMedia) {
+      if (!allowAttachments) {
+        const attachReply = 'cant check attachments btw describe it';
+        await sendAiNotice(attachReply, 'ai-attachment-disabled');
         return;
       }
 
@@ -2882,17 +2797,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       if (unsupportedMedia) {
         const attachReply =
           'i can only read images and text files like .txt .js .lua';
-
-        await sendWithMentionReview({
-          guild: message.guild,
-          requestedBy: message.author,
-          channel: message.channel,
-          replyToMessageId: message.id,
-          content: attachReply,
-          source: 'ai',
-          allowedMentions: allowedMentionsAiReplyPing(),
-          noMentionsOnApprove: true,
-        }).catch(() => {});
+        await sendAiNotice(attachReply, 'ai-attachment-unsupported');
         return;
       }
     }
@@ -2910,16 +2815,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       }) || null;
 
       if (!editTarget) {
-        await sendWithMentionReview({
-          guild: message.guild,
-          requestedBy: message.author,
-          channel: message.channel,
-          replyToMessageId: message.id,
-          content: 'send one file or say which filename u want edited',
-          source: 'ai',
-          allowedMentions: allowedMentionsAiReplyPing(),
-          noMentionsOnApprove: true,
-        }).catch(() => {});
+        await sendAiNotice('send one file or say which filename u want edited', 'ai-edit-ambiguous');
         return;
       }
     }
@@ -3066,16 +2962,24 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     const botDisplayName = stripControlChars(rawBotDisplayName) || 'Goose';
 
     const botName = pickBotNameFromDisplayName(botDisplayName);
-    const systemText = buildAiSystemPrompt({
-      botName,
-      botDisplayName,
-      botUsernameTag: BOT_USERNAME_TAG,
-      currentDateTime,
-      allowAttachments,
-      editIntent,
-      hasWebResults: webResults.length > 0 || directPages.length > 0,
-      hasExecutorTracker: !!executorTrackerBlock,
-    });
+    const systemText = aiRawMode
+      ? buildRawAiSystemPrompt({
+          currentDateTime,
+          allowAttachments,
+          editIntent,
+          hasWebResults: webResults.length > 0 || directPages.length > 0,
+          hasExecutorTracker: !!executorTrackerBlock,
+        })
+      : buildAiSystemPrompt({
+          botName,
+          botDisplayName,
+          botUsernameTag: BOT_USERNAME_TAG,
+          currentDateTime,
+          allowAttachments,
+          editIntent,
+          hasWebResults: webResults.length > 0 || directPages.length > 0,
+          hasExecutorTracker: !!executorTrackerBlock,
+        });
 
     // Typing indicator is already running (started early). We'll stop it in the finalizer.
 
@@ -3203,7 +3107,11 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       return;
     }
 
-    aiText = stripModelThinking(aiText);
+    if (!aiRawMode) {
+      aiText = stripModelThinking(aiText);
+    } else {
+      aiText = String(aiText || '').trim();
+    }
 
     if (editIntent && editTarget) {
       let rawCode = extractCodeForEdit(aiText);
@@ -3215,7 +3123,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
         return;
       }
 
-      if (looksLikePromptLeak(rawCode) || looksLikeReasoningLeak(rawCode)) {
+      if (!aiRawMode && (looksLikePromptLeak(rawCode) || looksLikeReasoningLeak(rawCode))) {
         await safeReply(message, {
           content: 'edit failed try again',
           allowedMentions: allowedMentionsSafe(),
@@ -3244,6 +3152,9 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       });
 
       if (sendRes.sent) {
+        if (sendRes.messageId) {
+          trackBotMessage({ id: sendRes.messageId }, 'ai-edit');
+        }
         const embed = buildModLogEmbed({
           title: 'AI edited attachment',
           moderator: message.author,
@@ -3260,72 +3171,97 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
         return;
       }
 
-      await safeReply(message, {
+      await safeReplyTracked(message, {
         content: 'failed to send edited file',
         allowedMentions: allowedMentionsAiReplyPing(),
-      });
+      }, 'ai-edit-fallback');
       return;
     }
 
-    let sanitized = sanitizeAiOutput(aiText);
-    aiText = sanitized.text;
+    if (!aiRawMode) {
+      let sanitized = sanitizeAiOutput(aiText);
+      aiText = sanitized.text;
 
-    if (!aiText) {
-      let retryErr = null;
+      if (!aiText) {
+        let retryErr = null;
+        try {
+          const strictSystem = buildStrictSystemPrompt(systemText);
+          const retryText = await callAiOnce({
+            system: strictSystem,
+            temperature: Math.min(temperature, 0.6),
+            maxTokens: isLightChat ? Math.min(maxTokens, 200) : maxTokens,
+          });
+          sanitized = sanitizeAiOutput(stripModelThinking(retryText));
+          aiText = sanitized.text;
+        } catch (e) {
+          retryErr = e;
+        }
+
+        if (!aiText) {
+          const reasonList = sanitized.analysis?.reasons?.length
+            ? sanitized.analysis.reasons.join(', ')
+            : 'unknown';
+          const rawPreview = sanitized.analysis?.cleaned || '';
+
+          const embed = buildModLogEmbed({
+            title: 'AI output blocked',
+            moderator: message.author,
+            target: null,
+            reason: `Sanitized (${reasonList})${retryErr ? ' after retry' : ''}`,
+            extraFields: [
+              { name: 'Channel', value: `${message.channel} (\`${message.channel.id}\`)`, inline: false },
+              {
+                name: 'User message',
+                value: neutralizeMentions(message.content?.slice(0, 1024) || '(empty)'),
+                inline: false,
+              },
+              {
+                name: 'Model output (raw)',
+                value: neutralizeMentions(rawPreview.slice(0, 1024) || '(empty)'),
+                inline: false,
+              },
+            ],
+            color: 0xed4245,
+          });
+          await sendLogEmbed({ guild: message.guild, config, getGuildConfig, client }, embed);
+
+          if (AI_FORCE_VISIBLE_REPLY) {
+            await safeReplyTracked(message, {
+              content: FALLBACK_AI_REPLY_TEXT,
+              allowedMentions: allowedMentionsSafe(),
+            }, 'ai-sanitized-fallback');
+          }
+          return;
+        }
+      }
+    } else if (!aiText) {
       try {
-        const strictSystem = buildStrictSystemPrompt(systemText);
         const retryText = await callAiOnce({
-          system: strictSystem,
-          temperature: Math.min(temperature, 0.6),
-          maxTokens: isLightChat ? Math.min(maxTokens, 200) : maxTokens,
+          system: systemText,
+          temperature: Math.min(temperature, 0.7),
+          maxTokens: isLightChat ? Math.min(maxTokens, 240) : maxTokens,
         });
-        sanitized = sanitizeAiOutput(stripModelThinking(retryText));
-        aiText = sanitized.text;
-      } catch (e) {
-        retryErr = e;
+        aiText = String(retryText || '').trim();
+      } catch {
+        aiText = '';
       }
 
       if (!aiText) {
-        const reasonList = sanitized.analysis?.reasons?.length
-          ? sanitized.analysis.reasons.join(', ')
-          : 'unknown';
-        const rawPreview = sanitized.analysis?.cleaned || '';
-
-        const embed = buildModLogEmbed({
-          title: 'AI output blocked',
-          moderator: message.author,
-          target: null,
-          reason: `Sanitized (${reasonList})${retryErr ? ' after retry' : ''}`,
-          extraFields: [
-            { name: 'Channel', value: `${message.channel} (\`${message.channel.id}\`)`, inline: false },
-            {
-              name: 'User message',
-              value: neutralizeMentions(message.content?.slice(0, 1024) || '(empty)'),
-              inline: false,
-            },
-            {
-              name: 'Model output (raw)',
-              value: neutralizeMentions(rawPreview.slice(0, 1024) || '(empty)'),
-              inline: false,
-            },
-          ],
-          color: 0xed4245,
-        });
-        await sendLogEmbed({ guild: message.guild, config, getGuildConfig, client }, embed);
-
-        await safeReply(message, {
-          content: "i glitched lol say it again",
+        await safeReplyTracked(message, {
+          content: FALLBACK_AI_REPLY_TEXT,
           allowedMentions: allowedMentionsSafe(),
-        });
+        }, 'ai-empty-raw');
         return;
       }
     }
 
-    // Replace role mentions with readable role names (no ping), then neutralize mentions.
-    aiText = await replaceRoleMentionsWithNames(aiText, message.guild);
+    if (!aiRawMode) {
+      // Replace role mentions with readable role names (no ping), then neutralize mentions.
+      aiText = await replaceRoleMentionsWithNames(aiText, message.guild);
 
-    // Extra safety: neutralize visible mass-mentions in AI output.
-    aiText = neutralizeMentions(aiText);
+      // Extra safety: neutralize visible mass-mentions in AI output.
+      aiText = neutralizeMentions(aiText);
+    }
 
     // Reply to the user message
     const MAX_AI_LINES = 4;
@@ -3338,7 +3274,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
           .map((s) => String(s || '').trim())
           .filter(Boolean);
 
-    if (!hasCodeBlock) {
+    if (!hasCodeBlock && !aiRawMode) {
       parts = collapseRepetitiveLines(parts);
     }
 
@@ -3356,45 +3292,33 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     let lastSendRes = { sent: false, reviewed: false };
     for (const part of toSend) {
       // eslint-disable-next-line no-await-in-loop
-      // Always ping the author on the reply reference (repliedUser=true).
-      // This prevents confusion where users think the reply is for someone else.
-      lastSendRes = await sendWithMentionReview({
-        guild: message.guild,
-        requestedBy: message.author,
-        channel: message.channel,
-        replyToMessageId: message.id,
+      const sendOutcome = await sendAiReplyGuaranteed({
         content: part,
-        source: 'ai',
-        allowedMentions: allowedMentionsAiReplyPing(),
-        noMentionsOnApprove: true,
+        fallbackText: FALLBACK_AI_REPLY_TEXT,
+        forceVisibleReply: AI_FORCE_VISIBLE_REPLY,
+        sendPrimary: (text) => sendWithMentionReview({
+          guild: message.guild,
+          requestedBy: message.author,
+          channel: message.channel,
+          replyToMessageId: message.id,
+          content: text,
+          source: 'ai',
+          allowedMentions: allowedMentionsAiReplyPing(),
+          noMentionsOnApprove: true,
+        }),
+        sendFallback: (text) => safeReplyTracked(message, {
+          content: text,
+          allowedMentions: allowedMentionsSafe(),
+        }, 'ai-send-fallback'),
       });
 
-      if (lastSendRes.error && !lastSendRes.sent) {
-        // eslint-disable-next-line no-await-in-loop
-        await safeReply(message, {
-          content: `cant send rn ${lastSendRes.error}`,
-          allowedMentions: allowedMentionsSafe(),
-        });
-        break;
+      lastSendRes = sendOutcome.primary || { sent: false, reviewed: false };
+      if (lastSendRes.sent && lastSendRes.messageId) {
+        trackBotMessage({ id: lastSendRes.messageId }, 'ai-primary');
       }
 
-      if (lastSendRes.reviewed && !lastSendRes.sent) {
-        // If it's blocked because no log channel, tell user. If review is pending, also tell user.
-        if (lastSendRes.error) {
-          // eslint-disable-next-line no-await-in-loop
-          await safeReply(message, {
-            content: `cant send that rn ${lastSendRes.error}`,
-            allowedMentions: allowedMentionsSafe(),
-          });
-        } else {
-          // eslint-disable-next-line no-await-in-loop
-          await safeReply(message, {
-            content: 'mods gotta ok that first its in the log channel',
-            allowedMentions: allowedMentionsSafe(),
-          });
-        }
-        break;
-      }
+      if (!sendOutcome.sent) break;
+      if (sendOutcome.mode === 'fallback') break;
     }
 
     const embed = buildModLogEmbed({
@@ -3416,6 +3340,19 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       aiInFlight.delete(message.id);
     }
   }
+
+  const runAiChat = createChatOrchestrator({
+    execute: handleAiChat,
+    onError: async (err, { message } = {}) => {
+      console.error('[handleAiChat] unhandled error:', err);
+      if (AI_FORCE_VISIBLE_REPLY && message) {
+        await safeReplyTracked(message, {
+          content: FALLBACK_AI_REPLY_TEXT,
+          allowedMentions: allowedMentionsSafe(),
+        }, 'ai-unhandled-fallback');
+      }
+    },
+  });
 
   // =====================
   // Events
@@ -3475,6 +3412,11 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       }
     }, 60_000);
 
+    // Keep reply-target tracker bounded.
+    setInterval(() => {
+      replyTargetTracker.prune();
+    }, 60_000);
+
     try {
       await registerSlashCommands();
       console.log('Slash commands registered.');
@@ -3488,7 +3430,12 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
 
   // Prefix + AI triggers + ban channel
   client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
+    if (message.author.bot) {
+      if (client.user && message.author.id === client.user.id) {
+        trackBotMessage(message, 'messageCreate');
+      }
+      return;
+    }
 
     const isGuildMessage = !!message.guild;
     const guildCfg = isGuildMessage ? getGuildConfig(config, message.guild.id) : null;
@@ -3530,28 +3477,17 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }
 
     if (isGuildMessage) {
-      // AI trigger: pinged or replied to bot
-      const isMention = client.user && message.mentions.has(client.user);
+      const trigger = await detectAiTrigger({
+        message,
+        clientUserId: client.user?.id,
+        tracker: replyTargetTracker,
+        fetchReferenceMessage,
+        detectDangerousMentions,
+        hasMediaAttachment,
+        randomProbability: 0.02,
+      });
 
-      let repliedMessage = null;
-      if (message.reference?.messageId) {
-        // Prefer fetchReference when available (more accurate)
-        repliedMessage = await (typeof message.fetchReference === 'function'
-          ? message.fetchReference().catch(() => null)
-          : message.channel.messages.fetch(message.reference.messageId).catch(() => null));
-      }
-
-      const isReplyToBot = !!(repliedMessage && client.user && repliedMessage.author.id === client.user.id);
-
-      // 2% random chance to reply even if user didn't call the bot
-      // Avoid random replies if the message contains mass-mention strings.
-      const randomChat =
-        Math.random() < 0.02 &&
-        !detectDangerousMentions(message.content).dangerous &&
-        !hasMediaAttachment(message);
-      const isRandomTrigger = !isMention && !isReplyToBot && randomChat;
-
-      if (isMention || isReplyToBot || isRandomTrigger) {
+      if (trigger.shouldTrigger) {
         // Blacklist: block AI usage for this user.
         if (isUserAiBlacklisted(config, guildCfg, message.author.id)) {
           return;
@@ -3566,7 +3502,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
           .replaceAll(botMentionA, '')
           .replaceAll(botMentionB, '')
           .trim();
-        const pingOnly = isMention && !isReplyToBot && !withoutMention;
+        const pingOnly = trigger.isMention && !trigger.isReplyToBot && !withoutMention;
         const limit = pingOnly ? AI_RATE_LIMIT_PING_ONLY_PER_MINUTE : AI_RATE_LIMIT_PER_MINUTE;
         const rl = addToUserBucket(aiRateLimitBuckets, message.author.id, nowMs, { limit, windowMs: 60_000 });
         if (!rl.ok) {
@@ -3577,6 +3513,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
           return;
         }
 
+        const repliedMessage = trigger.repliedMessage || null;
         const repliedMember = repliedMessage?.member || null;
         const repliedDisplayName = repliedMember?.displayName || repliedMessage?.author?.globalName || repliedMessage?.author?.username;
 
@@ -3595,16 +3532,18 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
               repliedAuthorIsBot: !!repliedMessage.author?.bot,
               repliedMember,
             }
-          : {};
+          : trigger.replyToMessageId
+            ? { repliedToMessageId: trigger.replyToMessageId }
+            : {};
 
-        context.isRandomTrigger = isRandomTrigger;
+        context.isRandomTrigger = trigger.isRandomTrigger;
+        context.triggerReason = trigger.reason;
+        context.replySource = trigger.replySource || null;
 
         context.rateLimitSkip = true;
 
         // Fire and forget
-        handleAiChat(message, context).catch((err) => {
-          console.error('[handleAiChat] unhandled error:', err);
-        });
+        runAiChat(message, context).catch(() => {});
       }
     }
 
@@ -3743,6 +3682,48 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }
 
     if (!isGuildMessage) return;
+
+    if (cmd === 'q') {
+      if (!isCreator(message.author.id)) {
+        await safeReply(message, {
+          content: pickRoast(),
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      const mode = String(args[0] || 'status').trim().toLowerCase();
+      const current = !!config.aiRawMode;
+
+      if (mode === 'status') {
+        await safeReply(message, {
+          content: `q mode is ${current ? 'on' : 'off'}`,
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      let next = current;
+      if (mode === 'toggle') next = !current;
+      else if (mode === 'on' || mode === 'enable' || mode === 'enabled' || mode === '1' || mode === 'true') next = true;
+      else if (mode === 'off' || mode === 'disable' || mode === 'disabled' || mode === '0' || mode === 'false') next = false;
+      else {
+        await safeReply(message, {
+          content: `usage: \`${prefix}q <on|off|toggle|status>\``,
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      config.aiRawMode = next;
+      saveConfig(config);
+
+      await safeReply(message, {
+        content: `q mode ${next ? 'enabled' : 'disabled'}${next ? ' (personality/sanitize off)' : ''}`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+      return;
+    }
 
     if (cmd === 'addhfapi') {
       if (!isCreator(message.author.id)) {

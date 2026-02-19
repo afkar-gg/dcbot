@@ -43,6 +43,18 @@ function readNumber(key, fallback, { min, max } = {}) {
   return result;
 }
 
+function readBoolean(key, fallback = false) {
+  const value = RAW_CONFIG[key];
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const lower = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(lower)) return true;
+    if (['0', 'false', 'no', 'off'].includes(lower)) return false;
+  }
+  return !!fallback;
+}
+
 module.exports = {
   CONFIG_PATH,
   RAW_CONFIG,
@@ -78,4 +90,8 @@ module.exports = {
   AI_RANDOM_CONTEXT_MIN_KEEP: readNumber('AI_RANDOM_CONTEXT_MIN_KEEP', 5, { min: 1 }),
   AI_RANDOM_CONTEXT_MAX_KEEP: readNumber('AI_RANDOM_CONTEXT_MAX_KEEP', 10, { min: 1 }),
   AI_VISIBLE_CHANNEL_MAX_NAMES: readNumber('AI_VISIBLE_CHANNEL_MAX_NAMES', 80, { min: 1 }),
+  AI_REPLY_TRACKER_MAX_IDS: readNumber('AI_REPLY_TRACKER_MAX_IDS', 5000, { min: 100 }),
+  AI_REPLY_TRACKER_TTL_MS: readNumber('AI_REPLY_TRACKER_TTL_MS', 21_600_000, { min: 60_000 }),
+  AI_FALLBACK_REPLY_TEXT: readString('AI_FALLBACK_REPLY_TEXT', 'i glitched lol say it again'),
+  AI_FORCE_VISIBLE_REPLY: readBoolean('AI_FORCE_VISIBLE_REPLY', true),
 };

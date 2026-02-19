@@ -117,7 +117,10 @@ Changes the prefix for the current server.
 ## Notes
 - AI chatbot uses **Hugging Face Inference Providers (Router)**. Configure `HUGGINGFACE_API_KEY` in `config.json`.
 - You can switch chat routing/provider presets (creator-only) with: `s.sethfprovider <novita|together|fastest|preferred|cheapest|groq|fireworks|nscale|hf-inference>`.
+- Creator-only raw AI mode toggle: `s.q <on|off|toggle|status>` (turns off personality/sanitization shaping).
 - AI chat is rate-limited per user (config keys: `AI_RATE_LIMIT_PER_MINUTE`, `AI_RATE_LIMIT_PING_ONLY_PER_MINUTE`).
+- Reply detection for AI uses message tracking + fetch fallback (config: `AI_REPLY_TRACKER_MAX_IDS`, `AI_REPLY_TRACKER_TTL_MS`).
+- Guaranteed visible AI fallback reply can be configured with `AI_FORCE_VISIBLE_REPLY` and `AI_FALLBACK_REPLY_TEXT`.
 - Date/time answers use runtime clock context. Optional: set `BOT_TIMEZONE` (default `UTC`) and `BOT_TIME_LOCALE` (default `en-US`) in `config.json`.
 - Ban-channel enforcement uses Discord built-in ban message deletion.
 - Loadstring web host listens on `127.0.0.1:3006` by default (configurable with `LOADSTRING_WEB_PORT`).
