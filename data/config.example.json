@@ -3,5 +3,7 @@
   "hfApiKeys": [],
   "hfChatModel": "novita",
   "globalLogChannelId": null,
-  "aiBlacklistUserIds": []
+  "aiBlacklistUserIds": [],
+  "creatorWhitelistUserIds": [],
+  "allowAttachments": false
 }

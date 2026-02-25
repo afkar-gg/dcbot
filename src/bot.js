@@ -10,6 +10,7 @@ const {
   ButtonStyle,
   ChannelType,
   PermissionsBitField,
+  StickerFormatType,
 } = require('discord.js');
 
 const crypto = require('node:crypto');
@@ -31,7 +32,7 @@ const {
 } = require('./utils/time');
 
 const { buildModLogEmbed, sendLogEmbed } = require('./services/logService');
-const { huggingfaceChatCompletion, huggingfaceImageCaption } = require('./services/huggingfaceService');
+const { huggingfaceChatCompletion, huggingfaceImageCaption, huggingfaceImageOcr } = require('./services/huggingfaceService');
 const { neutralizeMentions } = require('./utils/sanitize');
 const {
   createLoadstringStore,
@@ -65,6 +66,7 @@ const {
   HUGGINGFACE_API_KEY: RUNTIME_HUGGINGFACE_API_KEY,
   HF_CHAT_MODEL: RUNTIME_HF_CHAT_MODEL,
   HF_IMAGE_MODEL: RUNTIME_HF_IMAGE_MODEL,
+  HF_OCR_MODEL: RUNTIME_HF_OCR_MODEL,
   AI_CALL_TIMEOUT_MS,
   BOT_TIMEZONE,
   BOT_TIME_LOCALE,
@@ -72,6 +74,8 @@ const {
   ATTACHMENT_TEXT_MAX_CHARS,
   ATTACHMENT_TEXT_OUTPUT_MAX_CHARS,
   ATTACHMENT_IMAGE_MAX_BYTES,
+  ATTACHMENT_IMAGE_OCR_MAX_CHARS,
+  ATTACHMENT_IMAGE_ANALYSIS_TIMEOUT_MS,
   ATTACHMENT_MAX_COUNT,
   WEB_SEARCH_MAX_RESULTS,
   WEB_SEARCH_MAX_PAGES,
@@ -86,6 +90,10 @@ const {
   AI_VISIBLE_CHANNEL_MAX_NAMES,
   AI_REPLY_TRACKER_MAX_IDS,
   AI_REPLY_TRACKER_TTL_MS,
+  AI_MEMBER_FACTS_CACHE_TTL_MS,
+  AI_MEMBER_FACTS_FORCE_REFRESH_ON_INTENT,
+  AI_MEMBER_FACTS_ALWAYS_INCLUDE_AUTHOR,
+  AI_THREAD_NEW_PARTICIPANT_SIGNAL,
   AI_FALLBACK_REPLY_TEXT,
   AI_FORCE_VISIBLE_REPLY,
 } = require('./services/runtimeConfig');
@@ -96,6 +104,7 @@ const CREATOR_ALERT_GUILD_ID = '1387021291898273842';
 const CREATOR_ALERT_CHANNEL_ID = '1387021963511468073';
 const DEFAULT_HF_MODEL = 'moonshotai/Kimi-K2.5:novita';
 const BOT_USERNAME_TAG = 'Goose#9289';
+const BOT_INVITE_URL = 'https://discord.com/oauth2/authorize?client_id=803528296590868480&scope=bot&permissions=277025643584';
 const HF_PROVIDER_PRESETS = {
   // Existing provider-pinned presets
   novita: 'moonshotai/Kimi-K2.5:novita',
@@ -124,13 +133,16 @@ const HF_PROVIDER_PRESETS = {
   ovhcloud: 'meta-llama/Llama-3.1-8B-Instruct:ovhcloud',
   publicai: 'meta-llama/Llama-3.1-8B-Instruct:publicai',
 };
-const DEFAULT_HF_IMAGE_MODEL = 'Salesforce/blip-image-captioning-base';
+const DEFAULT_HF_IMAGE_MODEL = 'Qwen/Qwen2.5-VL-7B-Instruct:preferred';
+const DEFAULT_HF_OCR_MODEL = 'Qwen/Qwen2.5-VL-7B-Instruct:preferred';
 const ALLOWED_TEXT_ATTACHMENT_EXTS = new Set(['.txt', '.js', '.lua']);
 const ALLOWED_IMAGE_ATTACHMENT_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
 const MAX_TEXT_ATTACHMENT_BYTES = ATTACHMENT_TEXT_MAX_BYTES;
 const MAX_TEXT_ATTACHMENT_CHARS = ATTACHMENT_TEXT_MAX_CHARS;
 const MAX_TEXT_ATTACHMENT_OUTPUT_CHARS = ATTACHMENT_TEXT_OUTPUT_MAX_CHARS;
 const MAX_IMAGE_ATTACHMENT_BYTES = ATTACHMENT_IMAGE_MAX_BYTES;
+const MAX_IMAGE_OCR_CHARS = ATTACHMENT_IMAGE_OCR_MAX_CHARS;
+const IMAGE_ANALYSIS_TIMEOUT_MS = ATTACHMENT_IMAGE_ANALYSIS_TIMEOUT_MS;
 const MAX_ATTACHMENTS_PER_MESSAGE = ATTACHMENT_MAX_COUNT;
 const MAX_WEB_RESULTS = WEB_SEARCH_MAX_RESULTS;
 const MAX_WEB_PAGES = WEB_SEARCH_MAX_PAGES;
@@ -143,24 +155,38 @@ const MAX_RANDOM_CONTEXT_KEEP = AI_RANDOM_CONTEXT_MAX_KEEP;
 const MAX_VISIBLE_CHANNEL_NAMES = AI_VISIBLE_CHANNEL_MAX_NAMES;
 const MAX_REPLY_TRACKER_IDS = AI_REPLY_TRACKER_MAX_IDS;
 const REPLY_TRACKER_TTL_MS = AI_REPLY_TRACKER_TTL_MS;
+const MEMBER_FACTS_CACHE_TTL_MS = Math.max(5_000, Number(AI_MEMBER_FACTS_CACHE_TTL_MS) || 120_000);
+const MEMBER_FACTS_FORCE_REFRESH_ON_INTENT = !!AI_MEMBER_FACTS_FORCE_REFRESH_ON_INTENT;
+const MEMBER_FACTS_ALWAYS_INCLUDE_AUTHOR = !!AI_MEMBER_FACTS_ALWAYS_INCLUDE_AUTHOR;
+const THREAD_NEW_PARTICIPANT_SIGNAL = !!AI_THREAD_NEW_PARTICIPANT_SIGNAL;
 const FALLBACK_AI_REPLY_TEXT = String(AI_FALLBACK_REPLY_TEXT || 'i glitched lol say it again').trim() || 'i glitched lol say it again';
+const API_LIST_PAGE_SIZE = 5;
+const API_LIST_PANEL_TTL_MS = 30 * 60_000;
 
 async function pingCreatorInGlobalLog(client, config, { guild, text } = {}) {
   try {
     const globalLogChannelId = config?.globalLogChannelId || null;
-    if (!globalLogChannelId) return;
+    if (!globalLogChannelId) return false;
 
     const channel = await client.channels.fetch(globalLogChannelId).catch(() => null);
-    if (!channel || !channel.isTextBased?.()) return;
+    if (!channel || !channel.isTextBased?.()) {
+      console.error(`Global log channel unavailable: ${globalLogChannelId}`);
+      return false;
+    }
 
     const where = guild?.name ? `in ${guild.name}` : '';
     const content = `<@${CREATOR_USER_ID}> ${String(text || '').trim()} ${where}`.trim();
-    await channel.send({
+    const sent = await channel.send({
       content,
       allowedMentions: { parse: ['users'], users: [CREATOR_USER_ID], roles: [], repliedUser: false },
-    }).catch(() => {});
-  } catch {
-    // ignore
+    }).catch((err) => {
+      console.error(`Failed sending depletion ping to global log ${globalLogChannelId}:`, err?.message || err);
+      return null;
+    });
+    return !!sent;
+  } catch (e) {
+    console.error('Global log depletion ping crashed:', e?.message || e);
+    return false;
   }
 }
 
@@ -182,30 +208,52 @@ async function notifyCreatorLowCredits(client, { guild, keyMasked } = {}) {
 
     const where = guild?.name ? `in ${guild.name}` : '';
     const keyInfo = keyMasked ? ` (${keyMasked})` : '';
+    let delivered = false;
 
     if (channel && channel.isTextBased?.()) {
-      await channel
+      const sent = await channel
         .send({
           content: `<@${CREATOR_USER_ID}> ur api key ran out gng im dying${keyInfo} ${where}`.trim(),
           allowedMentions: { parse: ['users'], users: [CREATOR_USER_ID], roles: [], repliedUser: false },
         })
-        .catch(() => {});
-      return;
+        .catch((err) => {
+          console.error('Low-credit alert channel send failed:', err?.message || err);
+          return null;
+        });
+      if (sent) delivered = true;
+      if (delivered) return true;
     }
 
     const user = await client.users.fetch(CREATOR_USER_ID).catch(() => null);
     if (user) {
-      await user
+      const dm = await user
         .send(`ur api key ran out gng im dying${keyInfo} ${where}`.trim())
-        .catch(() => {});
+        .catch((err) => {
+          console.error('Low-credit DM send failed:', err?.message || err);
+          return null;
+        });
+      if (dm) delivered = true;
     }
-  } catch {
-    // ignore
+    if (!delivered) {
+      console.error('Low-credit alert could not be delivered to alert channel or DM.');
+    }
+    return delivered;
+  } catch (e) {
+    console.error('Low-credit notification crashed:', e?.message || e);
+    return false;
   }
 }
 
 function isCreator(userId) {
   return String(userId || '') === CREATOR_USER_ID;
+}
+
+function hasCreatorWhitelistAccess(config, userId) {
+  const id = String(userId || '').trim();
+  if (!id) return false;
+  if (isCreator(id)) return true;
+  const list = Array.isArray(config?.creatorWhitelistUserIds) ? config.creatorWhitelistUserIds : [];
+  return list.includes(id);
 }
 
 function pickRoast() {
@@ -225,6 +273,14 @@ function maskApiKey(key) {
   return `${k.slice(0, 4)}…${k.slice(-4)}`;
 }
 
+function summarizeErr(err) {
+  const status = Number(err?.status);
+  const statusText = Number.isFinite(status) && status > 0 ? `status ${status}` : '';
+  const msg = String(err?.message || err || '').trim();
+  if (statusText && msg) return `${statusText} | ${msg}`;
+  return statusText || msg || 'unknown error';
+}
+
 function isHfCreditDepletedError(err) {
   const status = Number(err?.status);
   const body = String(err?.body || err?.message || '').toLowerCase();
@@ -242,29 +298,33 @@ function isHfCreditDepletedError(err) {
 // Keyed by triggering message id.
 const aiInFlight = new Map();
 const hfDepletedCounts = new Map();
-const hfDepletedNotified = new Set();
+const hfDepletedGlobalPinged = new Set();
+const hfDepletedCreatorNotified = new Set();
 
 // Per-user rolling window rate limit for AI triggers (mention/reply/random).
 // Map<userId, number[]> where array holds timestamps (ms) within last minute.
 const aiRateLimitBuckets = new Map();
+// Lightweight member facts cache for faster non-identity turns.
+// Map<`${guildId}:${userId}`, { line: string, fetchedAt: number }>
+const memberFactsCache = new Map();
 
 function buildHelpText(prefix, { includeAll = false } = {}) {
   const lines = [
     '**Commands**',
     `• \`/ping\` or \`${prefix}ping\` - Shows bot latency`,
     `• \`/help\` or \`${prefix}help\` - DM this command list`,
-    `• \`${prefix}help all\` - Show all commands (including creator-only)`,
+    `• \`${prefix}help all\` - Show all commands (including creator/whitelist commands)`,
     `• \`${prefix}loadstring <name> <inline?>\`, \`${prefix}ls <name> <inline?>\`, or \`/loadstring\` - Create/update a hosted loadstring link`,
     `• \`${prefix}lslist\` or \`/lslist\` - List your hosted loadstring links`,
     `• \`${prefix}lsremove <name>\` or \`/lsremove\` - Remove one hosted loadstring`,
     `• \`${prefix}lsinfo <name>\` or \`/lsinfo\` - DM detailed info + history links`,
     `• \`/setbanchannel\` or \`${prefix}setbanchannel\` (alias: \`${prefix}setbanch\`) - Set ban channel`,
     `• \`/setlogchannel\` or \`${prefix}setlogchannel\` (alias: \`${prefix}setlogch\`) - Set log channel`,
-    `• \`/attachments\` or \`${prefix}attachments <on|off|toggle|status>\` - Toggle attachment reading (images + .txt/.js/.lua)`,
     `• \`/setprefix\` or \`${prefix}setprefix <new>\` - Change server prefix`,
     `• \`/say\` - Bot says something (mods only, mention-review protected)`,
-    `• \`${prefix}blacklist <add|remove|list> <@user|id?>\` - Block/unblock users from using the AI (mods only)`,
-    `• \`/blacklist\` - Same as above (mods only)`,
+    `• \`${prefix}blacklist <add|remove|list> <@user|id?>\` - Block/unblock users from AI (creator/whitelist only)`,
+    `• \`/blacklist\` - Same as above (creator/whitelist only)`,
+    `• \`/attachments\` or \`${prefix}attachments <on|off|toggle|status>\` - Toggle global attachment reading (images + .txt/.js/.lua)`,
     `• \`/mute\` or \`${prefix}mute <@user|id> <duration> <reason?>\` - Timeout`,
     `• \`/kick\` or \`${prefix}kick <@user|id> <reason?>\` - Kick`,
     `• \`/ban\` or \`${prefix}ban <@user|id> <delete?> <reason?>\` - Ban`,
@@ -273,7 +333,7 @@ function buildHelpText(prefix, { includeAll = false } = {}) {
 
   if (includeAll) {
     lines.push('');
-    lines.push('**Creator-only**');
+    lines.push('**Creator/Whitelist**');
     lines.push(`• \`${prefix}q <on|off|toggle|status>\` - raw ai mode (no personality/sanitize)`);
     lines.push(`• \`${prefix}addhfapi <key>\``);
     lines.push(`• \`${prefix}removehfapi <key|masked>\``);
@@ -282,6 +342,7 @@ function buildHelpText(prefix, { includeAll = false } = {}) {
     lines.push(`• \`${prefix}sethfprovider <novita|together|fastest|preferred|cheapest|groq|fireworks|nscale|hf-inference>\``);
     lines.push(`• \`${prefix}servers [noinvites]\``);
     lines.push(`• \`${prefix}setgloballog <#channel|channelId|off>\``);
+    lines.push(`• \`${prefix}creatorwhitelist <add|remove|list> <@user|id?>\` - manage creator whitelist`);
   }
 
   return lines.join('\n');
@@ -302,6 +363,33 @@ function parseChannelId(token) {
   const raw = String(token).trim();
   const match = raw.match(/^<#(\d+)>$/) || raw.match(/(\d{6,})/);
   return match ? match[1] : '';
+}
+
+function parseUserIdToken(token) {
+  if (!token) return '';
+  const raw = String(token).trim();
+  const mentionMatch = raw.match(/^<@!?(\d+)>$/);
+  if (mentionMatch) return mentionMatch[1];
+  const idMatch = raw.match(/^(\d{6,})$/);
+  return idMatch ? idMatch[1] : '';
+}
+
+function isBotInviteRequest(text) {
+  const t = String(text || '').toLowerCase().trim();
+  if (!t) return false;
+
+  if (/\b(?:how|where)\s+(?:do|can)\s+i\s+(?:invite|add)\s+(?:this\s+bot|the\s+bot|bot|you)\b/.test(t)) return true;
+  if (/\bcan\s+i\s+(?:invite|add)\s+(?:this\s+bot|the\s+bot|bot|you)\b/.test(t)) return true;
+  if (/\b(?:invite|add)\s+(?:this\s+bot|the\s+bot|bot|you)\s+to\s+(?:my\s+)?(?:server|guild|discord)\b/.test(t)) return true;
+  if (/\b(?:give|send|drop)\s+me\s+(?:your|the|this\s+bot(?:'s)?|bot)\s+invite\s+(?:link|url)\b/.test(t)) return true;
+  if (/\bwhat(?:'s| is)\s+(?:your|the|this\s+bot(?:'s)?|bot)\s+invite\s+(?:link|url)\b/.test(t)) return true;
+
+  const hasInviteIntent = /\b(invite|add)\b/.test(t);
+  const hasBotTarget = /\b(this\s+bot|the\s+bot|bot|you|yourself|urself|your)\b/.test(t);
+  const hasInviteContext = /\b(link|url|server|guild|discord|oauth)\b/.test(t);
+  if (hasInviteIntent && hasBotTarget && hasInviteContext) return true;
+
+  return false;
 }
 
 function buildLoadstringPublicUrl(publicPath) {
@@ -654,12 +742,92 @@ function classifyAttachment(attachment) {
   return null;
 }
 
-async function buildAttachmentContext(message, { describeImage } = {}) {
-  const attachments = message?.attachments ? [...message.attachments.values()] : [];
+function getStickerFormatName(format) {
+  switch (format) {
+    case StickerFormatType.PNG:
+      return 'png';
+    case StickerFormatType.APNG:
+      return 'apng';
+    case StickerFormatType.Lottie:
+      return 'lottie';
+    case StickerFormatType.GIF:
+      return 'gif';
+    default:
+      return String(format || 'unknown');
+  }
+}
+
+function extractCustomEmojiTokens(text) {
+  const out = [];
+  const seen = new Set();
+  const raw = String(text || '');
+  for (const match of raw.matchAll(/<(a?):([a-zA-Z0-9_]{2,64}):([0-9]{5,})>/g)) {
+    const id = String(match[3] || '');
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      animated: match[1] === 'a',
+      name: stripControlChars(match[2] || 'emoji'),
+      id,
+    });
+  }
+  return out;
+}
+
+let unicodeEmojiRegexCache;
+function getUnicodeEmojiRegex() {
+  if (unicodeEmojiRegexCache !== undefined) return unicodeEmojiRegexCache;
+  try {
+    unicodeEmojiRegexCache = new RegExp(
+      '(?:\\p{Regional_Indicator}{2}|[#*0-9]\\uFE0F?\\u20E3|\\p{Extended_Pictographic}(?:\\uFE0F|\\uFE0E)?(?:\\u200D\\p{Extended_Pictographic}(?:\\uFE0F|\\uFE0E)?)*)',
+      'gu'
+    );
+  } catch {
+    unicodeEmojiRegexCache = null;
+  }
+  return unicodeEmojiRegexCache;
+}
+
+function extractUnicodeEmojiTokens(text, limit = 20) {
+  const out = [];
+  const seen = new Set();
+  const regex = getUnicodeEmojiRegex();
+  if (!regex) return out;
+  const raw = String(text || '');
+  regex.lastIndex = 0;
+  let match;
+  while ((match = regex.exec(raw)) !== null) {
+    const value = String(match[0] || '');
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function trimAttachmentTextForPrompt(text, limit) {
+  let safe = stripOutputControlChars(text || '');
+  if (safe.length > limit) {
+    safe = `${safe.slice(0, limit)}...`;
+  }
+  return safe.trim();
+}
+
+async function buildAttachmentContext(message, { analyzeImage, includeFileAttachments = true } = {}) {
+  const attachments = includeFileAttachments && message?.attachments ? [...message.attachments.values()] : [];
+  const stickers = message?.stickers ? [...message.stickers.values()] : [];
+  const customEmojiTokens = extractCustomEmojiTokens(message?.content || '');
+  const unicodeEmojiTokens = extractUnicodeEmojiTokens(message?.content || '');
   const result = {
-    hasAny: attachments.length > 0,
+    hasAny: attachments.length > 0 || stickers.length > 0 || customEmojiTokens.length > 0 || unicodeEmojiTokens.length > 0,
     allowed: [],
     blocked: [],
+    stickers,
+    emoji: {
+      custom: customEmojiTokens,
+      unicode: unicodeEmojiTokens,
+    },
     lines: [],
   };
 
@@ -687,24 +855,29 @@ async function buildAttachmentContext(message, { describeImage } = {}) {
         continue;
       }
 
-      let caption = '';
-      if (describeImage) {
+      let imageMeta = null;
+      if (analyzeImage) {
         try {
           // eslint-disable-next-line no-await-in-loop
-          caption = await describeImage(attachment);
-        } catch {
-          caption = '';
+          imageMeta = await analyzeImage(attachment);
+        } catch (e) {
+          const name = stripControlChars(attachment?.name || 'image') || 'image';
+          console.error(`[ai-media] image analysis crashed for ${name}:`, summarizeErr(e));
+          imageMeta = null;
         }
       }
 
-      if (caption) {
-        result.lines.push(`[attachment image: ${nameSafe} | caption: ${caption}]`);
-      } else {
+      const caption = trimAttachmentTextForPrompt(imageMeta?.caption || '', 500);
+      const ocrText = trimAttachmentTextForPrompt(imageMeta?.ocrText || '', MAX_IMAGE_OCR_CHARS);
+
+      const bits = [];
+      if (caption) bits.push(`caption: ${caption}`);
+      if (ocrText) bits.push(`ocr: ${ocrText}`);
+      if (bits.length === 0) {
         const url = attachment?.url || attachment?.proxyURL || '';
-        result.lines.push(
-          `[attachment image: ${nameSafe} | caption: (unavailable)${url ? ` | ${url}` : ''}]`
-        );
+        bits.push(`caption: (unavailable)${url ? ` | ${url}` : ''}`);
       }
+      result.lines.push(`[attachment image: ${nameSafe} | ${bits.join(' | ')}]`);
       continue;
     }
 
@@ -727,14 +900,33 @@ async function buildAttachmentContext(message, { describeImage } = {}) {
         continue;
       }
 
-      text = stripOutputControlChars(text || '');
-      if (text.length > MAX_TEXT_ATTACHMENT_CHARS) {
-        text = `${text.slice(0, MAX_TEXT_ATTACHMENT_CHARS)}...`;
-      }
-
-      const body = text.trim() ? text : '(empty file)';
+      const body = trimAttachmentTextForPrompt(text || '', MAX_TEXT_ATTACHMENT_CHARS) || '(empty file)';
       result.lines.push(`[attachment text: ${nameSafe}]\n${body}`);
     }
+  }
+
+  for (const sticker of stickers.slice(0, 8)) {
+    const stickerName = stripControlChars(sticker?.name || 'sticker') || 'sticker';
+    const stickerId = String(sticker?.id || '');
+    const format = getStickerFormatName(sticker?.format);
+    result.lines.push(
+      `[sticker: ${stickerName}${stickerId ? ` | id ${stickerId}` : ''}${format ? ` | format ${format}` : ''}]`
+    );
+  }
+
+  if (customEmojiTokens.length > 0) {
+    const value = customEmojiTokens
+      .slice(0, 12)
+      .map((item) => `${item.animated ? 'animated ' : ''}${item.name}:${item.id}`)
+      .join(', ');
+    const extra = customEmojiTokens.length > 12 ? ` (+${customEmojiTokens.length - 12} more)` : '';
+    result.lines.push(`[emoji: custom ${value}${extra}]`);
+  }
+
+  if (unicodeEmojiTokens.length > 0) {
+    const shown = unicodeEmojiTokens.slice(0, 18).join(' ');
+    const extra = unicodeEmojiTokens.length > 18 ? ` (+${unicodeEmojiTokens.length - 18} more)` : '';
+    result.lines.push(`[emoji: unicode ${shown}${extra}]`);
   }
 
   return result;
@@ -862,25 +1054,378 @@ function selectAdaptiveFallbackContext(
     .sort((a, b) => Number(a?.createdTimestamp || 0) - Number(b?.createdTimestamp || 0));
 }
 
-function extractAskedMemberTargets(message, context = {}) {
+function normalizeMemberLookupName(value) {
+  return stripControlChars(stripZeroWidth(String(value || '')))
+    .toLowerCase()
+    .replace(/[`'"’“”]/g, '')
+    .replace(/[^a-z0-9#@._\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeMemberLookupNameCompact(value) {
+  return normalizeMemberLookupName(value).replace(/\s+/g, '');
+}
+
+function buildMemberFactsCacheKey(guildId, userId) {
+  const gid = String(guildId || '').trim();
+  const uid = String(userId || '').trim();
+  if (!gid || !uid) return '';
+  return `${gid}:${uid}`;
+}
+
+function readMemberFactsCacheLine(guildId, userId) {
+  const key = buildMemberFactsCacheKey(guildId, userId);
+  if (!key) return '';
+
+  const entry = memberFactsCache.get(key);
+  if (!entry) return '';
+
+  const fetchedAt = Number(entry.fetchedAt || 0);
+  if (!Number.isFinite(fetchedAt) || fetchedAt <= 0) {
+    memberFactsCache.delete(key);
+    return '';
+  }
+
+  if (Date.now() - fetchedAt > MEMBER_FACTS_CACHE_TTL_MS) {
+    memberFactsCache.delete(key);
+    return '';
+  }
+
+  const line = String(entry.line || '').trim();
+  return line.startsWith('- ') ? line : '';
+}
+
+function writeMemberFactsCacheLine(guildId, userId, line) {
+  const key = buildMemberFactsCacheKey(guildId, userId);
+  const safeLine = String(line || '').trim();
+  if (!key || !safeLine.startsWith('- ')) return;
+  memberFactsCache.set(key, {
+    line: safeLine,
+    fetchedAt: Date.now(),
+  });
+}
+
+function pruneMemberFactsCache() {
+  if (memberFactsCache.size === 0) return;
+  const graceTtl = Math.max(MEMBER_FACTS_CACHE_TTL_MS * 2, MEMBER_FACTS_CACHE_TTL_MS + 60_000);
+  const cutoff = Date.now() - graceTtl;
+  for (const [key, entry] of memberFactsCache.entries()) {
+    const fetchedAt = Number(entry?.fetchedAt || 0);
+    if (!Number.isFinite(fetchedAt) || fetchedAt <= 0 || fetchedAt < cutoff) {
+      memberFactsCache.delete(key);
+    }
+  }
+}
+
+function isMemberFactsRequestText(text) {
+  return /(\brole\b|\broles\b|\busername\b|\buser\s*name\b|\bdisplay\s*name\b|\bnickname\b|\bperm\b|\bperms\b|\bpermissions\b|\bid\b|\badmin\b|\bmoderator\b|\bmod\b|\bban\b|\bkick\b|\bmute\b|\btimeout\b|\bmanage\b|\bmember\s+facts?\b|\bmember\s+info\b|\buser\s+info\b|\bwho(?:'s| is)\b|\binfo(?:rmation)?\s+(?:on|for|about)\b|\bprofile\b)/i
+    .test(String(text || ''));
+}
+
+function isLikelyModerationCommandText(text) {
+  const raw = stripOutputControlChars(stripZeroWidth(String(text || ''))).trim();
+  if (!raw) return false;
+  const firstToken = raw.split(/\s+/)[0].toLowerCase();
+  const match = firstToken.match(/^(?:[a-z0-9]{1,4})?([./!$?])([a-z][a-z0-9_-]{1,24})$/i);
+  if (!match) return false;
+  const command = String(match[2] || '').toLowerCase();
+  return /^(ban|tempban|kick|mute|timeout|unmute|warn)$/.test(command);
+}
+
+function isServerOwnerLookupText(text) {
+  const raw = stripOutputControlChars(stripZeroWidth(String(text || ''))).toLowerCase();
+  if (!raw) return false;
+  if (!/\b(server|guild|ts)\b/.test(raw)) return false;
+  if (/\bserver\s+owner\b/.test(raw)) return true;
+  if (/\bowner\s+of\s+(?:this|the|ts)\s+server\b/.test(raw)) return true;
+  if (/\bwho\s+owns?\s+(?:this|the|ts)\s+server\b/.test(raw)) return true;
+  if (/\bwho(?:'s| is)\s+(?:the\s+)?owner\b/.test(raw) && /\b(?:this|the|ts)\s+server\b/.test(raw)) return true;
+  if (/\bwho(?:'s| is)\s+own\s+ts\s+server\b/.test(raw)) return true;
+  return false;
+}
+
+function isBotFactsRequestText(text) {
+  return /(\b(your|ur)\s+(role|roles|username|display\s*name|nickname|perm|perms|permissions|id)\b|\bwhat(?:'s| is)\s+(?:your|ur)\b|\babout\s+you\b|\bthe\s+bot\b)/i
+    .test(String(text || ''));
+}
+
+function isIdentityLookupIntentText(text) {
+  return /(\bwho(?:'s| is)\b|\babout\b|\binfo(?:rmation)?\s+(?:on|for|about)\b|\bprofile\b|\bwhich\s+user\b|\bthat\s+(?:user|person)\b|\bwho\s+are\s+they\b|\bwhat(?:'s| is)\s+(?:their|his|her)\b)/i
+    .test(String(text || ''));
+}
+
+function hasMentionOrReplyTarget(message, context = {}) {
+  const hasMentionUsers = !!(message?.mentions?.users?.size > 0);
+  const hasMentionMembers = !!(message?.mentions?.members?.size > 0);
+  const hasRawMention = /<@!?(\d+)>/.test(String(message?.content || ''));
+  const hasReplyTarget = !!context?.repliedAuthorId;
+  return hasMentionUsers || hasMentionMembers || hasRawMention || hasReplyTarget;
+}
+
+function shouldBuildMemberFactsContext(message, context = {}) {
+  const text = String(message?.content || '');
+  if (!text) return false;
+  if (isLikelyModerationCommandText(text)) return false;
+  if (isMemberFactsRequestText(text)) return true;
+  if (isIdentityLookupIntentText(text) && hasMentionOrReplyTarget(message, context)) return true;
+  return false;
+}
+
+function isExecutorStatusFactRequestText(text) {
+  return /(\bweao\b|\btracker\b|\bstatus\b|\bdetected\b|\bundetected\b|\bupdated\b|\boutdated\b|\bunc\b|\bsunc\b|\bclientmods?\b|\bclient\s+modification\b|\bbanwaves?\b)/i
+    .test(String(text || ''));
+}
+
+function sanitizePlainMemberNameCandidate(value) {
+  let out = stripControlChars(stripZeroWidth(String(value || '')));
+  out = out.replace(/^[@\s]+/, '');
+  out = out.replace(/^[\s:;,.!?()[\]{}<>"'`-]+|[\s:;,.!?()[\]{}<>"'`-]+$/g, '');
+  out = out.replace(/\s+/g, ' ').trim();
+  out = out.replace(/^(?:the\s+)?(?:user|member)\s+/i, '');
+  out = out.replace(/^(?:named|name|called|is)\s+/i, '');
+  if (!out || out.length < 2 || out.length > 40) return '';
+  if (/^<[@#!&]/.test(out)) return '';
+  if (/^[0-9]+$/.test(out)) return '';
+  if (/^(me|myself|my|you|your|ur|bot|roles?|perms?|permissions?|username|display|name|id)$/i.test(out)) {
+    return '';
+  }
+  if (out.split(/\s+/).length > 4) return '';
+  return out;
+}
+
+function extractPlainMemberNameCandidates(rawText) {
+  const text = stripOutputControlChars(stripZeroWidth(String(rawText || '')));
+  if (!text) return [];
+  const out = [];
+  const seen = new Set();
+
+  function add(raw) {
+    const candidate = sanitizePlainMemberNameCandidate(raw);
+    if (!candidate) return;
+    const key = candidate.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(candidate);
+  }
+
+  for (const match of text.matchAll(/["'`]([^"'`\n]{2,40})["'`]/g)) {
+    add(match[1]);
+  }
+
+  for (const match of text.matchAll(/(?:^|\s)@([a-zA-Z0-9._-]{2,32})\b/g)) {
+    add(match[1]);
+  }
+
+  for (const match of text.matchAll(/\b([a-zA-Z0-9._-]{2,32})\s+(?:roles?|perms?|permissions?|username|display\s*name|nickname|id)\b/gi)) {
+    add(match[1]);
+  }
+
+  for (const match of text.matchAll(/\b(?:roles?|perms?|permissions?|username|display\s*name|nickname|id)\s+(?:of|for)\s+([a-zA-Z0-9._ -]{2,40})\b/gi)) {
+    add(match[1]);
+  }
+
+  for (const match of text.matchAll(/\b(?:does|is)\s+([a-zA-Z0-9._ -]{2,40})\s+(?:have|get|got|with)?\s*(?:roles?|perms?|permissions?)\b/gi)) {
+    add(match[1]);
+  }
+
+  for (const match of text.matchAll(/\bwho(?:'s| is)\s+([a-zA-Z0-9._ -]{2,40})\b/gi)) {
+    add(match[1]);
+  }
+
+  for (const match of text.matchAll(/\b(?:about|info(?:rmation)?\s+(?:on|for|about)|profile\s+of)\s+([a-zA-Z0-9._ -]{2,40})\b/gi)) {
+    add(match[1]);
+  }
+
+  return out.slice(0, 4);
+}
+
+function extractUserIdCandidatesFromText(rawText) {
+  const text = stripOutputControlChars(stripZeroWidth(String(rawText || '')));
+  if (!text) return [];
+
+  const out = [];
+  const seen = new Set();
+
+  function add(idRaw) {
+    const id = String(idRaw || '').trim();
+    if (!/^\d{15,22}$/.test(id)) return;
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push(id);
+  }
+
+  for (const match of text.matchAll(/\b(?:user\s*id|userid|member\s*id|id)\s*[:#=\-]?\s*(\d{15,22})\b/gi)) {
+    add(match[1]);
+  }
+
+  for (const match of text.matchAll(/\b(\d{15,22})\b/g)) {
+    const id = String(match[1] || '');
+    const at = Number(match.index || 0);
+    const start = Math.max(0, at - 36);
+    const end = Math.min(text.length, at + id.length + 36);
+    const window = text.slice(start, end).toLowerCase();
+    if (!/\b(user(?:name)?|member|userid|user\s*id|member\s*id|display\s*name|nickname|profile|roles?|perms?|permissions?|about|who(?:'s|\s+is)?|info(?:rmation)?|id)\b/.test(window)) {
+      continue;
+    }
+    add(id);
+  }
+
+  return out.slice(0, 4);
+}
+
+function buildAuthorMemberFactsTarget(message) {
+  const id = message?.author?.id ? String(message.author.id) : '';
+  if (!id) return null;
+  return {
+    id,
+    label: stripControlChars(
+      message?.member?.displayName ||
+      message?.author?.globalName ||
+      message?.author?.username ||
+      message?.author?.tag ||
+      'current user'
+    ),
+    member: message?.member || null,
+    lookupSource: 'author',
+  };
+}
+
+function isExactMemberLookupMatch(member, candidate) {
+  const needle = normalizeMemberLookupName(candidate);
+  const needleCompact = normalizeMemberLookupNameCompact(candidate);
+  if (!needle || !needleCompact || !member) return false;
+
+  const variants = [
+    member.displayName,
+    member.user?.globalName,
+    member.user?.username,
+    member.user?.tag,
+  ];
+
+  return variants.some((value) => {
+    const normalized = normalizeMemberLookupName(value);
+    const compact = normalizeMemberLookupNameCompact(value);
+    return !!normalized && (normalized === needle || compact === needleCompact);
+  });
+}
+
+function isLooseMemberLookupMatch(member, candidate) {
+  const needle = normalizeMemberLookupName(candidate);
+  const needleCompact = normalizeMemberLookupNameCompact(candidate);
+  if (!needle || !needleCompact || needleCompact.length < 4 || !member) return false;
+
+  const variants = [
+    member.displayName,
+    member.user?.globalName,
+    member.user?.username,
+    member.user?.tag,
+  ];
+
+  return variants.some((value) => {
+    const normalized = normalizeMemberLookupName(value);
+    const compact = normalizeMemberLookupNameCompact(value);
+    if (!normalized || !compact) return false;
+    return normalized.includes(needle) || compact.includes(needleCompact);
+  });
+}
+
+async function resolveMemberByPlainName(guild, candidate) {
+  if (!guild || !candidate) return { status: 'none' };
+
+  const query = String(candidate).trim().slice(0, 64);
+  if (!query) return { status: 'none' };
+
+  const exactById = new Map();
+  const fromCache = [...guild.members.cache.values()]
+    .filter((member) => isExactMemberLookupMatch(member, candidate));
+  for (const member of fromCache) {
+    const id = String(member?.id || '');
+    if (id) exactById.set(id, member);
+  }
+
+  const searched = await guild.members.search({ query, limit: 15 }).catch(() => null);
+  const fromSearch = searched ? [...searched.values()] : [];
+  for (const member of fromSearch) {
+    if (!isExactMemberLookupMatch(member, candidate)) continue;
+    const id = String(member?.id || '');
+    if (id) exactById.set(id, member);
+  }
+
+  const exactMatches = [...exactById.values()];
+  if (exactMatches.length === 1) return { status: 'resolved', member: exactMatches[0] };
+  if (exactMatches.length > 1) return { status: 'ambiguous' };
+
+  const looseById = new Map();
+  for (const member of fromCache) {
+    if (!isLooseMemberLookupMatch(member, candidate)) continue;
+    const id = String(member?.id || '');
+    if (id) looseById.set(id, member);
+  }
+  for (const member of fromSearch) {
+    if (!isLooseMemberLookupMatch(member, candidate)) continue;
+    const id = String(member?.id || '');
+    if (id) looseById.set(id, member);
+  }
+
+  const looseMatches = [...looseById.values()];
+  if (looseMatches.length === 1) return { status: 'resolved', member: looseMatches[0] };
+  if (looseMatches.length > 1) return { status: 'ambiguous' };
+
+  return { status: 'not_found' };
+}
+
+async function extractAskedMemberTargets(message, context = {}) {
   const targets = [];
   const seen = new Set();
   const botId = message?.client?.user?.id ? String(message.client.user.id) : '';
   const mentionedMembers = message?.mentions?.members || null;
+  const unresolvedByLabel = new Set();
+
+  function addResolvedTarget({ id, label, member, lookupSource = '' }) {
+    const targetId = String(id || '');
+    if (!targetId || seen.has(targetId)) return;
+    seen.add(targetId);
+    targets.push({ id: targetId, label, member: member || null, lookupSource });
+  }
+
+  function addUnresolvedTarget(label, reason) {
+    const safeLabel = stripControlChars(label || 'that user') || 'that user';
+    const key = `${safeLabel.toLowerCase()}|${reason}`;
+    if (unresolvedByLabel.has(key)) return;
+    unresolvedByLabel.add(key);
+    targets.push({ id: '', label: safeLabel, member: null, unresolvedReason: reason });
+  }
 
   // If the user is asking about themselves ("my username", "my roles", etc.) include the author.
-  const rawTextForSelf = String(message?.content || '').toLowerCase();
+  const rawTextForSelf = String(message?.content || '');
+  const rawText = rawTextForSelf;
+  const lowerTextForSelf = rawTextForSelf.toLowerCase();
+  const wantsMemberInfo = shouldBuildMemberFactsContext(message, context);
   const selfKeywords = /(\bmy\b|\bme\b|\bmine\b|\bim\b|\bi'm\b|\bi\b)/;
-  const selfInfoKeywords = /(\brole\b|\broles\b|\busername\b|\buser\s*name\b|\bdisplay\s*name\b|\bnickname\b|\bperm\b|\bperms\b|\bpermissions\b|\bid\b|\badmin\b|\bmoderator\b|\bmod\b|\bban\b|\bkick\b|\bmute\b|\btimeout\b|\bmanage\b)/;
-  const wantsSelfInfo = selfKeywords.test(rawTextForSelf) && selfInfoKeywords.test(rawTextForSelf);
+  const wantsSelfInfo = selfKeywords.test(lowerTextForSelf) && wantsMemberInfo;
 
-  if (wantsSelfInfo && message?.author?.id && message.author.id !== botId) {
-    const id = String(message.author.id);
-    seen.add(id);
-    targets.push({
-      id,
+  if (wantsSelfInfo && message?.author?.id) {
+    addResolvedTarget({
+      id: String(message.author.id),
       label: stripControlChars(message.member?.displayName || message.author?.globalName || message.author?.username || message.author?.tag || 'you'),
       member: message.member || null,
+      lookupSource: 'self',
+    });
+  }
+
+  if (wantsMemberInfo && botId && isBotFactsRequestText(rawTextForSelf)) {
+    addResolvedTarget({
+      id: botId,
+      label: stripControlChars(
+        message?.guild?.members?.me?.displayName ||
+        message?.guild?.members?.me?.user?.globalName ||
+        message?.guild?.members?.me?.user?.username ||
+        message?.client?.user?.username ||
+        'bot'
+      ),
+      member: message?.guild?.members?.me || null,
+      lookupSource: 'bot',
     });
   }
 
@@ -888,16 +1433,17 @@ function extractAskedMemberTargets(message, context = {}) {
   const mentionedUsers = message?.mentions?.users ? [...message.mentions.users.values()] : [];
   for (const user of mentionedUsers) {
     const id = String(user?.id || '');
-    if (!id || seen.has(id) || id === botId) continue;
-    seen.add(id);
+    if (!id || seen.has(id)) continue;
+    if (wantsMemberInfo && botId && id === botId && !isBotFactsRequestText(rawTextForSelf)) continue;
     const member =
       (mentionedMembers && typeof mentionedMembers.get === 'function' ? mentionedMembers.get(id) : null) ||
       message?.guild?.members?.cache?.get?.(id) ||
       null;
-    targets.push({
+    addResolvedTarget({
       id,
       label: stripControlChars(user?.globalName || user?.username || user?.tag || 'user'),
       member,
+      lookupSource: 'mention',
     });
   }
 
@@ -905,22 +1451,22 @@ function extractAskedMemberTargets(message, context = {}) {
   const mentionedMemberList = mentionedMembers ? [...mentionedMembers.values()] : [];
   for (const member of mentionedMemberList) {
     const id = String(member?.id || member?.user?.id || '');
-    if (!id || seen.has(id) || id === botId) continue;
-    seen.add(id);
-    targets.push({
+    if (!id || seen.has(id)) continue;
+    if (wantsMemberInfo && botId && id === botId && !isBotFactsRequestText(rawTextForSelf)) continue;
+    addResolvedTarget({
       id,
       label: stripControlChars(member.displayName || member.user?.globalName || member.user?.username || member.user?.tag || 'user'),
       member,
+      lookupSource: 'mention_member',
     });
   }
 
   // Also parse raw mention tokens (covers cases where mention collections are partial)
-  const rawText = String(message?.content || '');
   const rawMentionIds = [...rawText.matchAll(/<@!?([0-9]+)>/g)].map((m) => m[1]);
   for (const idRaw of rawMentionIds) {
     const id = String(idRaw || '');
-    if (!id || seen.has(id) || id === botId) continue;
-    seen.add(id);
+    if (!id || seen.has(id)) continue;
+    if (wantsMemberInfo && botId && id === botId && !isBotFactsRequestText(rawTextForSelf)) continue;
 
     const member =
       (mentionedMembers && typeof mentionedMembers.get === 'function' ? mentionedMembers.get(id) : null) ||
@@ -928,23 +1474,116 @@ function extractAskedMemberTargets(message, context = {}) {
       null;
     const cachedUser = message?.client?.users?.cache?.get?.(id) || member?.user || null;
 
-    targets.push({
+    addResolvedTarget({
       id,
       label: stripControlChars(cachedUser?.globalName || cachedUser?.username || cachedUser?.tag || `id ${id}`),
       member,
+      lookupSource: 'raw_mention',
     });
+  }
+
+  // Parse plain numeric ids from natural language when intent keywords are present.
+  // Example: "what is userid 123456789012345678 role"
+  if (wantsMemberInfo && message?.guild) {
+    const explicitIdCandidates = extractUserIdCandidatesFromText(rawText);
+    for (const candidateId of explicitIdCandidates) {
+      const id = String(candidateId || '');
+      if (!id || seen.has(id)) continue;
+      const member = message.guild.members?.cache?.get?.(id) || null;
+      let fetchedMember = member;
+      if (!fetchedMember && message.guild.members?.fetch) {
+        // eslint-disable-next-line no-await-in-loop
+        fetchedMember = await message.guild.members.fetch(id).catch(() => null);
+      }
+      if (!fetchedMember) {
+        addUnresolvedTarget(`id ${id}`, 'id_not_found');
+        continue;
+      }
+      addResolvedTarget({
+        id,
+        label: stripControlChars(
+          fetchedMember.displayName ||
+          fetchedMember.user?.globalName ||
+          fetchedMember.user?.username ||
+          fetchedMember.user?.tag ||
+          `id ${id}`
+        ),
+        member: fetchedMember,
+        lookupSource: 'explicit_id',
+      });
+    }
   }
 
   // Include replied-to user when available (helps "who is that" replies), even if other targets exist.
   if (context?.repliedAuthorId) {
     const id = String(context.repliedAuthorId);
-    if (id && id !== botId && !seen.has(id)) {
-      seen.add(id);
-      targets.push({
+    if (id && !seen.has(id)) {
+      addResolvedTarget({
         id,
         label: stripControlChars(context.repliedAuthorDisplayName || context.repliedAuthorTag || 'replied user'),
         member: context.repliedMember || message?.guild?.members?.cache?.get?.(id) || null,
+        lookupSource: 'reply',
       });
+    }
+  }
+
+  const wantsServerOwnerLookup = wantsMemberInfo && isServerOwnerLookupText(rawTextForSelf);
+  if (wantsServerOwnerLookup && message?.guild) {
+    let ownerId = String(message.guild.ownerId || '');
+    let ownerMember = ownerId ? message.guild.members?.cache?.get?.(ownerId) || null : null;
+
+    if ((!ownerId || !ownerMember) && typeof message.guild.fetchOwner === 'function') {
+      const fetchedOwner = await message.guild.fetchOwner().catch(() => null);
+      if (fetchedOwner) {
+        ownerId = String(fetchedOwner.id || fetchedOwner.user?.id || ownerId);
+        ownerMember = fetchedOwner;
+      }
+    }
+
+    if (ownerId && !ownerMember) {
+      ownerMember = await message.guild.members.fetch(ownerId).catch(() => null);
+    }
+
+    if (ownerId) {
+      addResolvedTarget({
+        id: ownerId,
+        label: stripControlChars(
+          ownerMember?.displayName ||
+          ownerMember?.user?.globalName ||
+          ownerMember?.user?.username ||
+          ownerMember?.user?.tag ||
+          'server owner'
+        ),
+        member: ownerMember || null,
+        lookupSource: 'owner',
+      });
+    }
+  }
+
+  if (wantsMemberInfo && message?.guild && !wantsServerOwnerLookup) {
+    const plainCandidates = extractPlainMemberNameCandidates(rawTextForSelf);
+    for (const candidate of plainCandidates) {
+      // eslint-disable-next-line no-await-in-loop
+      const resolved = await resolveMemberByPlainName(message.guild, candidate);
+      if (resolved?.status === 'resolved' && resolved.member?.id) {
+        addResolvedTarget({
+          id: resolved.member.id,
+          label: stripControlChars(
+            resolved.member.displayName ||
+            resolved.member.user?.globalName ||
+            resolved.member.user?.username ||
+            candidate
+          ),
+          member: resolved.member,
+          lookupSource: 'plain_name',
+        });
+        continue;
+      }
+      if (resolved?.status === 'ambiguous') {
+        addUnresolvedTarget(candidate, 'ambiguous');
+      } else if (resolved?.status === 'not_found') {
+        addUnresolvedTarget(candidate, 'not_found');
+      }
     }
   }
 
@@ -955,56 +1594,218 @@ function yesNo(value) {
   return value ? 'yes' : 'no';
 }
 
-async function buildMemberFactsBlock(guild, targets = []) {
+function formatMemberFactsLine(guild, targetId, target, member) {
+  const userTag = stripControlChars(member.user?.tag || member.user?.username || '') || '';
+  const userName = stripControlChars(member.user?.globalName || member.user?.username || '') || '';
+  const display =
+    stripControlChars(member.displayName || userName || target?.label || 'user') ||
+    'user';
+  const idHint = targetId ? ` (id ${targetId})` : '';
+  const tagHint = userTag && userTag !== display ? ` | tag ${userTag}` : userTag ? ` | tag ${userTag}` : '';
+  const userHint = `${idHint}${tagHint}`.trim();
+  const roleNames = [...member.roles.cache.values()]
+    .filter((role) => role.id !== guild.id)
+    .sort((a, b) => Number(b.position || 0) - Number(a.position || 0))
+    .map((role) => stripControlChars(role.name))
+    .filter(Boolean);
+  const roleText =
+    roleNames.length > 0
+      ? `${roleNames.slice(0, 12).join(', ')}${roleNames.length > 12 ? ` (+${roleNames.length - 12} more)` : ''}`
+      : 'none';
+
+  const perms = member.permissions;
+  return `- ${display}${userHint ? ` ${userHint}` : ''}: roles ${roleText}; perms admin ${yesNo(
+    perms?.has(PermissionsBitField.Flags.Administrator)
+  )}, manage guild ${yesNo(perms?.has(PermissionsBitField.Flags.ManageGuild))}, manage messages ${yesNo(
+    perms?.has(PermissionsBitField.Flags.ManageMessages)
+  )}, ban ${yesNo(perms?.has(PermissionsBitField.Flags.BanMembers))}, kick ${yesNo(
+    perms?.has(PermissionsBitField.Flags.KickMembers)
+  )}, timeout ${yesNo(perms?.has(PermissionsBitField.Flags.ModerateMembers))}`;
+}
+
+async function buildMemberFactsBlock(guild, targets = [], { forceRefresh = false } = {}) {
   if (!guild || !Array.isArray(targets) || targets.length === 0) return '';
 
   const lines = [];
   for (const target of targets) {
     const targetId = String(target?.id || '');
-    if (!targetId) continue;
+    if (!targetId) {
+      const fallbackName = stripControlChars(target?.label || 'that user') || 'that user';
+      if (target?.unresolvedReason === 'ambiguous') {
+        lines.push(`- ${fallbackName}: multiple members match that name; use @mention or id`);
+      } else if (target?.unresolvedReason === 'not_found') {
+        lines.push(`- ${fallbackName}: unable to resolve that member name; use @mention or id`);
+      } else if (target?.unresolvedReason === 'id_not_found') {
+        lines.push(`- ${fallbackName}: unable to find that user id in this server; use @mention or valid id`);
+      }
+      continue;
+    }
+
+    if (!forceRefresh) {
+      const cachedLine = readMemberFactsCacheLine(guild.id, targetId);
+      if (cachedLine) {
+        lines.push(cachedLine);
+        continue;
+      }
+    }
 
     let member = target?.member || guild.members.cache.get(targetId) || null;
-    if (!member) {
-      // eslint-disable-next-line no-await-in-loop
-      member = await guild.members.fetch(targetId).catch(() => null);
+    if (targetId === guild.client?.user?.id) {
+      member = member || guild.members.me || null;
+      if (!member && guild.members.fetchMe) {
+        // eslint-disable-next-line no-await-in-loop
+        member = await guild.members.fetchMe().catch(() => null);
+      }
     }
+
+    const shouldFetch = forceRefresh || !member;
+    if (shouldFetch) {
+      // eslint-disable-next-line no-await-in-loop
+      const fetched = await guild.members.fetch(targetId).catch(() => null);
+      if (fetched) {
+        member = fetched;
+      }
+    }
+
     if (!member) {
       const fallbackName = stripControlChars(target?.label || 'that user') || 'that user';
+      if (target?.lookupSource === 'explicit_id') {
+        lines.push(`- id ${targetId}: unable to find that user id in this server; use @mention or valid id`);
+        continue;
+      }
       lines.push(`- ${fallbackName}: unable to verify roles or permissions in this server`);
       continue;
     }
 
-    const userTag = stripControlChars(member.user?.tag || member.user?.username || '') || '';
-    const userName = stripControlChars(member.user?.globalName || member.user?.username || '') || '';
-    const display =
-      stripControlChars(member.displayName || userName || target?.label || 'user') ||
-      'user';
-    const idHint = targetId ? ` (id ${targetId})` : '';
-    const tagHint = userTag && userTag !== display ? ` | tag ${userTag}` : userTag ? ` | tag ${userTag}` : '';
-    const userHint = `${idHint}${tagHint}`.trim();
-    const roleNames = [...member.roles.cache.values()]
-      .filter((role) => role.id !== guild.id)
-      .sort((a, b) => Number(b.position || 0) - Number(a.position || 0))
-      .map((role) => stripControlChars(role.name))
-      .filter(Boolean);
-    const roleText =
-      roleNames.length > 0
-        ? `${roleNames.slice(0, 12).join(', ')}${roleNames.length > 12 ? ` (+${roleNames.length - 12} more)` : ''}`
-        : 'none';
-
-    const perms = member.permissions;
-    lines.push(
-      `- ${display}${userHint ? ` ${userHint}` : ''}: roles ${roleText}; perms admin ${yesNo(
-        perms?.has(PermissionsBitField.Flags.Administrator)
-      )}, manage guild ${yesNo(perms?.has(PermissionsBitField.Flags.ManageGuild))}, manage messages ${yesNo(
-        perms?.has(PermissionsBitField.Flags.ManageMessages)
-      )}, ban ${yesNo(perms?.has(PermissionsBitField.Flags.BanMembers))}, kick ${yesNo(
-        perms?.has(PermissionsBitField.Flags.KickMembers)
-      )}, timeout ${yesNo(perms?.has(PermissionsBitField.Flags.ModerateMembers))}`
-    );
+    const line = formatMemberFactsLine(guild, targetId, target, member);
+    lines.push(line);
+    writeMemberFactsCacheLine(guild.id, targetId, line);
   }
 
   return lines.length > 0 ? `\nMember facts:\n${lines.join('\n')}` : '';
+}
+
+function parseMemberFactLines(memberFactsBlock) {
+  return String(memberFactsBlock || '')
+    .split(/\r?\n/g)
+    .map((line) => String(line || '').trim())
+    .filter((line) => line.startsWith('- '));
+}
+
+function stripMemberFactBullet(line) {
+  return String(line || '').replace(/^-+\s*/, '').trim();
+}
+
+function normalizeLooseText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[`'"’“”]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function memberFactIdentityHints(line) {
+  const raw = stripMemberFactBullet(line);
+  const beforeColon = raw.split(':')[0] || raw;
+  const idMatch = beforeColon.match(/\(id\s+(\d+)\)/i);
+  const id = idMatch ? String(idMatch[1]) : '';
+  const name = beforeColon
+    .replace(/\(id\s+\d+\)/ig, '')
+    .replace(/\|\s*tag\s+.+$/i, '')
+    .trim();
+  return { id, name };
+}
+
+function isMemberFactsAnswerConfident(aiText, memberFactsBlock) {
+  const answer = normalizeLooseText(aiText);
+  const lines = parseMemberFactLines(memberFactsBlock);
+  if (!answer || lines.length === 0) return false;
+
+  const unresolvedFacts = lines.some((line) =>
+    /multiple members match|unable to resolve|unable to verify|unable to find/i.test(line)
+  );
+  if (unresolvedFacts) {
+    return /\b(unable|cant|can't|cannot|not verify|ambiguous|multiple)\b/.test(answer);
+  }
+
+  for (const line of lines) {
+    const { id, name } = memberFactIdentityHints(line);
+    const normalizedName = normalizeLooseText(name);
+    if (id && answer.includes(id)) return true;
+    if (normalizedName && normalizedName.length >= 2 && answer.includes(normalizedName)) return true;
+  }
+  return false;
+}
+
+function buildMemberFactsFallbackText(memberFactsBlock) {
+  const lines = parseMemberFactLines(memberFactsBlock)
+    .map((line) => {
+      const raw = stripMemberFactBullet(line);
+      if (!raw) return '';
+      if (/multiple members match|unable to resolve|unable to verify|unable to find/i.test(raw)) return raw;
+      const identityOnly = raw.split(':')[0]?.trim() || '';
+      return identityOnly || raw;
+    })
+    .filter(Boolean);
+  if (lines.length === 0) return 'cant verify member facts rn use @mention or id';
+  if (lines.length === 1) return lines[0];
+  const preview = lines.slice(0, 2).join(' | ');
+  return lines.length > 2 ? `${preview} | +${lines.length - 2} more` : preview;
+}
+
+function normalizeAiStyle(text) {
+  const raw = String(text || '');
+  if (!raw) return '';
+  if (/```[\s\S]*?```/m.test(raw)) return raw.trim();
+
+  let out = raw.replace(/[\u2013\u2014]+/g, '\n');
+  out = out.replace(/[ \t]+\n/g, '\n');
+  out = out.replace(/\n{3,}/g, '\n\n');
+  return out.trim();
+}
+
+function extractExecutorTrackerTopEntryLine(executorTrackerBlock) {
+  return String(executorTrackerBlock || '')
+    .split(/\r?\n/g)
+    .map((line) => String(line || '').trim())
+    .find((line) => /^\d+\.\s+/.test(line)) || '';
+}
+
+function extractExecutorTrackerTopEntryName(executorTrackerBlock) {
+  const line = extractExecutorTrackerTopEntryLine(executorTrackerBlock);
+  if (!line) return '';
+  const match = line.match(/^\d+\.\s*([^|]+)\|/);
+  return String(match?.[1] || '').trim();
+}
+
+function isExecutorStatusAnswerConfident(aiText, executorTrackerBlock, executorTrackerError = '') {
+  const answer = normalizeLooseText(aiText);
+  if (!answer) return false;
+
+  if (executorTrackerError) {
+    return /\b(unable|cant|can't|cannot|error|down|unavailable|failed)\b/.test(answer);
+  }
+
+  const topName = normalizeLooseText(extractExecutorTrackerTopEntryName(executorTrackerBlock));
+  if (!executorTrackerBlock) return false;
+  if (topName && answer.includes(topName)) return true;
+  if (/\bweao\b/.test(answer) && /\b(status|detected|updated|unc|sunc|clientmods|free|paid)\b/.test(answer)) {
+    return true;
+  }
+  return false;
+}
+
+function buildExecutorStatusFallbackText(executorTrackerBlock, executorTrackerError = '') {
+  const safeError = stripOutputControlChars(String(executorTrackerError || '')).trim();
+  if (safeError) return `weao api errored rn so i cant verify live status yet (${safeError})`;
+
+  const topLine = extractExecutorTrackerTopEntryLine(executorTrackerBlock);
+  if (topLine) {
+    const line = topLine.replace(/^\d+\.\s*/, '').trim();
+    return `from weao live rn: ${line}`.slice(0, 460);
+  }
+  return 'weao returned no live rows rn so i cant verify status yet';
 }
 
 function channelTypeKey(channel) {
@@ -1308,6 +2109,175 @@ function createBot({ loadstringStore } = {}) {
 
   const config = loadConfig();
   const lsStore = loadstringStore || createLoadstringStore();
+  if (!config.hfKeyUsage || typeof config.hfKeyUsage !== 'object' || Array.isArray(config.hfKeyUsage)) {
+    config.hfKeyUsage = {};
+    saveConfig(config);
+  }
+
+  let hfUsageSaveTimer = null;
+  let hfUsageDirty = false;
+
+  function ensureHfUsageStore() {
+    if (!config.hfKeyUsage || typeof config.hfKeyUsage !== 'object' || Array.isArray(config.hfKeyUsage)) {
+      config.hfKeyUsage = {};
+    }
+    return config.hfKeyUsage;
+  }
+
+  function isManagedHfKey(keyRaw = '') {
+    const key = String(keyRaw || '').trim();
+    if (!key) return false;
+    const keys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys : [];
+    return keys.includes(key);
+  }
+
+  function normalizeUsageCount(value) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }
+
+  function readHfUsageStats(keyRaw = '') {
+    const key = String(keyRaw || '').trim();
+    const raw = ensureHfUsageStore()?.[key];
+
+    return {
+      total: normalizeUsageCount(raw?.total),
+      success: normalizeUsageCount(raw?.success),
+      failed: normalizeUsageCount(raw?.failed),
+      chat: normalizeUsageCount(raw?.chat),
+      imageCaption: normalizeUsageCount(raw?.imageCaption),
+      imageOcr: normalizeUsageCount(raw?.imageOcr),
+      lastUsedAt: normalizeUsageCount(raw?.lastUsedAt),
+      lastSuccessAt: normalizeUsageCount(raw?.lastSuccessAt),
+      lastFailureAt: normalizeUsageCount(raw?.lastFailureAt),
+      lastError: String(raw?.lastError || '').trim(),
+    };
+  }
+
+  function ensureHfUsageRecord(keyRaw = '') {
+    const key = String(keyRaw || '').trim();
+    if (!key) return null;
+
+    const store = ensureHfUsageStore();
+    const current = readHfUsageStats(key);
+    store[key] = current;
+    return store[key];
+  }
+
+  function scheduleHfUsageSave() {
+    if (hfUsageSaveTimer) return;
+    hfUsageSaveTimer = setTimeout(() => {
+      hfUsageSaveTimer = null;
+      if (!hfUsageDirty) return;
+      hfUsageDirty = false;
+      saveConfig(config);
+    }, 1500);
+    hfUsageSaveTimer.unref?.();
+  }
+
+  function markHfInferenceUsage(keyRaw = '', { kind = 'chat', ok = true, error = '' } = {}) {
+    const key = String(keyRaw || '').trim();
+    if (!isManagedHfKey(key)) return;
+
+    const record = ensureHfUsageRecord(key);
+    if (!record) return;
+
+    const now = Date.now();
+    record.total += 1;
+    record.lastUsedAt = now;
+
+    if (kind === 'chat') record.chat += 1;
+    if (kind === 'imageCaption') record.imageCaption += 1;
+    if (kind === 'imageOcr') record.imageOcr += 1;
+
+    if (ok) {
+      record.success += 1;
+      record.lastSuccessAt = now;
+    } else {
+      record.failed += 1;
+      record.lastFailureAt = now;
+      const errText = String(error || '').trim();
+      if (errText) record.lastError = errText.slice(0, 220);
+    }
+
+    hfUsageDirty = true;
+    scheduleHfUsageSave();
+  }
+
+  function formatUsageTimestamp(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return 'never';
+    const unixSeconds = Math.floor(n / 1000);
+    if (!Number.isFinite(unixSeconds) || unixSeconds <= 0) return 'never';
+    return `<t:${unixSeconds}:R>`;
+  }
+
+  function buildApiListPanelComponents({ panelId, page, totalPages }) {
+    if (totalPages <= 1) return [];
+
+    const prevPage = page > 1 ? page - 1 : 1;
+    const nextPage = page < totalPages ? page + 1 : totalPages;
+
+    return [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`apilist:${panelId}:${prevPage}`)
+          .setLabel('Prev')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page <= 1),
+        new ButtonBuilder()
+          .setCustomId(`apilist:${panelId}:${nextPage}`)
+          .setLabel('Next')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page >= totalPages)
+      ),
+    ];
+  }
+
+  function buildApiListPagePayload({ entries = [], page = 1, panelId }) {
+    const total = entries.length;
+    const totalPages = Math.max(1, Math.ceil(total / API_LIST_PAGE_SIZE));
+    const safePage = Math.min(Math.max(Number(page) || 1, 1), totalPages);
+    const start = (safePage - 1) * API_LIST_PAGE_SIZE;
+    const pageEntries = entries.slice(start, start + API_LIST_PAGE_SIZE);
+
+    const fields = pageEntries.map((entry, idx) => ({
+      name: `${start + idx + 1}. **${entry.masked}**`,
+      value: [
+        `**Inference:** ${entry.stats.total} (ok ${entry.stats.success} | fail ${entry.stats.failed})`,
+        `**Chat:** ${entry.stats.chat} | **Img Caption:** ${entry.stats.imageCaption} | **Img OCR:** ${entry.stats.imageOcr}`,
+        `**Last Used:** ${entry.lastUsed}`,
+      ].join('\n'),
+      inline: false,
+    }));
+
+    return {
+      embeds: [
+        {
+          color: 0x5865f2,
+          title: 'HF API Keys - Inference Usage',
+          description: [
+            '----------------------------------------',
+            'Managed key inventory with cumulative usage counters.',
+            'Billing USD: unavailable (HF does not expose a supported token API for settings totals)',
+            '----------------------------------------',
+          ].join('\n'),
+          fields: fields.length
+            ? fields
+            : [{ name: 'No entries', value: 'No keys to display on this page.', inline: false }],
+          footer: {
+            text: `Page ${safePage}/${totalPages} | Total keys: ${total}`,
+          },
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      components: buildApiListPanelComponents({
+        panelId,
+        page: safePage,
+        totalPages,
+      }),
+    };
+  }
 
   function resolveHfChatModel() {
     const raw = String(RUNTIME_HF_CHAT_MODEL || config.hfChatModel || DEFAULT_HF_MODEL).trim();
@@ -1350,6 +2320,7 @@ function createBot({ loadstringStore } = {}) {
   // Mention-review state (in-memory)
   const pendingMentionReviews = new Map();
   const pendingLoadstringCopies = new Map();
+  const pendingApiListPanels = new Map();
   const replyTargetTracker = createReplyTargetTracker({
     maxIds: MAX_REPLY_TRACKER_IDS,
     ttlMs: REPLY_TRACKER_TTL_MS,
@@ -2295,7 +3266,7 @@ function createBot({ loadstringStore } = {}) {
   const attachmentsCommand = new SlashCommandBuilder()
     .setName('attachments')
     .setDMPermission(false)
-    .setDescription('Toggle attachment reading for the bot (mods only).')
+    .setDescription('Toggle global attachment reading for the bot (mods only).')
     .addStringOption((opt) =>
       opt
         .setName('mode')
@@ -2320,7 +3291,24 @@ function createBot({ loadstringStore } = {}) {
   const blacklistCommand = new SlashCommandBuilder()
     .setName('blacklist')
     .setDMPermission(false)
-    .setDescription('Blacklist users from using the AI chatbot (mods only).')
+    .setDescription('Blacklist users from using the AI chatbot (creator/whitelist only).')
+    .addStringOption((opt) =>
+      opt
+        .setName('action')
+        .setDescription('add/remove/list')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Add', value: 'add' },
+          { name: 'Remove', value: 'remove' },
+          { name: 'List', value: 'list' }
+        )
+    )
+    .addUserOption((opt) => opt.setName('user').setDescription('Target user (for add/remove)').setRequired(false))
+    .addStringOption((opt) => opt.setName('userid').setDescription('Target user ID (for add/remove)').setRequired(false));
+  const creatorWhitelistCommand = new SlashCommandBuilder()
+    .setName('creatorwhitelist')
+    .setDMPermission(false)
+    .setDescription('Manage creator whitelist for elevated features (creator/whitelist).')
     .addStringOption((opt) =>
       opt
         .setName('action')
@@ -2392,6 +3380,7 @@ function createBot({ loadstringStore } = {}) {
         attachmentsCommand.toJSON(),
         sayCommand.toJSON(),
         blacklistCommand.toJSON(),
+        creatorWhitelistCommand.toJSON(),
         muteCommand.toJSON(),
         kickCommand.toJSON(),
         banCommand.toJSON(),
@@ -2400,30 +3389,108 @@ function createBot({ loadstringStore } = {}) {
     });
   }
 
-  async function getExistingInviteCode(guild) {
+  function buildInviteUrl(code) {
+    return `https://discord.gg/${code}`;
+  }
+
+  function pickMostUsedInvite(invites) {
+    let best = null;
+    for (const invite of invites.values()) {
+      if (!invite?.code) continue;
+      if (!best) {
+        best = invite;
+        continue;
+      }
+
+      const uses = Number(invite?.uses);
+      const bestUses = Number(best?.uses);
+      const nextUses = Number.isFinite(uses) ? uses : 0;
+      const currentBestUses = Number.isFinite(bestUses) ? bestUses : 0;
+
+      if (nextUses > currentBestUses) {
+        best = invite;
+        continue;
+      }
+      if (nextUses < currentBestUses) continue;
+
+      const invitePermanent = !invite?.expiresTimestamp;
+      const bestPermanent = !best?.expiresTimestamp;
+      if (invitePermanent && !bestPermanent) {
+        best = invite;
+        continue;
+      }
+      if (invitePermanent !== bestPermanent) continue;
+
+      const inviteCreated = Number(invite?.createdTimestamp || 0);
+      const bestCreated = Number(best?.createdTimestamp || 0);
+      if (inviteCreated > bestCreated) best = invite;
+    }
+    return best;
+  }
+
+  async function getGuildInviteUrl(guild) {
+    let inviteUrl = null;
+
     try {
       const me = guild.members.me || (await guild.members.fetchMe().catch(() => null));
-      if (!me) return null;
-      if (!me.permissions?.has(PermissionsBitField.Flags.ManageGuild)) return null;
+      if (!me) return inviteUrl;
 
       const invites = await guild.invites.fetch().catch(() => null);
-      if (!invites || invites.size === 0) return null;
+      if (invites?.size) {
+        const pickedInvite = pickMostUsedInvite(invites);
+        if (pickedInvite?.code) {
+          inviteUrl = buildInviteUrl(pickedInvite.code);
+          return inviteUrl;
+        }
+      }
 
-      const invite = invites.find((i) => !i.expiresTimestamp) || invites.first();
-      return invite?.code || null;
+      const channels = await guild.channels.fetch().catch(() => null);
+      if (!channels || channels.size === 0) return inviteUrl;
+
+      const candidates = [...channels.values()].filter((channel) => {
+        if (!channel || typeof channel.createInvite !== 'function') return false;
+        const perms = channel.permissionsFor(me);
+        return !!(
+          perms?.has(PermissionsBitField.Flags.ViewChannel) &&
+          perms?.has(PermissionsBitField.Flags.CreateInstantInvite)
+        );
+      });
+
+      for (const channel of candidates) {
+        // eslint-disable-next-line no-await-in-loop
+        const createdInvite = await channel
+          .createInvite({
+            maxAge: 0,
+            maxUses: 0,
+            unique: false,
+            reason: 'servers command inventory',
+          })
+          .catch(() => null);
+        if (createdInvite?.code) {
+          inviteUrl = buildInviteUrl(createdInvite.code);
+          break;
+        }
+      }
+
+      return inviteUrl;
     } catch {
-      return null;
+      return inviteUrl;
     }
   }
 
   async function buildServerInventory({ includeInvites = true } = {}) {
-    const guilds = [...client.guilds.cache.values()].sort((a, b) => a.name.localeCompare(b.name));
+    const guilds = [...client.guilds.cache.values()].sort((a, b) => {
+      const aMembers = Number.isFinite(Number(a?.memberCount)) ? Number(a.memberCount) : 0;
+      const bMembers = Number.isFinite(Number(b?.memberCount)) ? Number(b.memberCount) : 0;
+      if (bMembers !== aMembers) return bMembers - aMembers;
+      return String(a?.name || '').localeCompare(String(b?.name || ''));
+    });
     const lines = [];
 
     for (let i = 0; i < guilds.length; i += 1) {
       const g = guilds[i];
-      const inviteCode = includeInvites ? await getExistingInviteCode(g) : null;
-      const invitePart = includeInvites ? ` | invite: ${inviteCode || 'n/a'}` : '';
+      const inviteUrl = includeInvites ? await getGuildInviteUrl(g) : null;
+      const invitePart = includeInvites ? ` | invite: ${inviteUrl || 'n/a'}` : '';
       const memberPart = typeof g.memberCount === 'number' ? ` | members: ${g.memberCount}` : '';
       lines.push(`${i + 1}. ${g.name} (${g.id})${memberPart}${invitePart}`);
     }
@@ -2465,85 +3532,114 @@ function buildAiSystemPrompt({
   hasWebResults = false,
   hasExecutorTracker = false,
 }) {
-    // Casual chat persona. Keep it fun, short, and NOT corporate.
-    // IMPORTANT: you are THIS Discord bot account, just chatting casually.
-    const name = botName || 'Goose';
-    const displayName = botDisplayName || name;
-    const usernameTag = botUsernameTag || BOT_USERNAME_TAG;
+  const name = botName || 'Goose';
+  const displayName = botDisplayName || name;
+  const usernameTag = botUsernameTag || BOT_USERNAME_TAG;
 
-    const base = [
-      `youre ${name} as a server discord bot but you talk like a person`,
-      `your username is ${usernameTag}`,
-      `your display name is ${displayName}`,
-      "your creator is afkar if someone asks who made you say afkar",
-      "if someone says bot clanker npc etc assume theyre talking about you",
-      'keep replies short like 1 to 2 sentences',
-      'sound gen z casual lower case ok light slang ok a little attitude ok',
-      'reply in the same language as the user and the chat context do not randomly switch to english',
-      'punctuation is okay keep it natural and never break website links',
-      'dont over explain dont lecture dont sound like support',
-      'you can be a lil teasing sometimes but never cruel',
-      'no hate no harassment no slurs no sexual content with minors',
-      'mild shortened swear words ok like sht fk fking but never slurs',
-      'never ping do not use @everyone @here or role mentions',
-      'never show hidden reasoning do not output think or analysis only output the final message',
-      'do not include chain of thought analysis or system/user/meta lines',
-      'never repeat the prompt or metadata lines like Server: Trigger: Attachment: Chat context Recent channel context Member facts Visible channels New message from',
-      'you know basic roblox scripting and executor talk at a high level only',
-      'when users say unc in executor/exploit talk they mean unified naming convention (not uncle)',
-      'do not give exploit code injection steps bypass tips or anything unsafe for roblox executors',
-      'never spam repeated lines or repeated letters',
-      'only mention attachments if Attachment: yes or [attachment ...] appears in context',
-      'if Trigger: random then dont act like you got pinged just reply casually like you jumped in',
-      'if Member facts are provided use only those facts for roles and permissions',
-      'if user asks about a mentioned user id like <@123> use Member facts to know their username/display name',
-      'never assume the current message author is the replied-to user unless ids match',
-      'when answering about roles/perms always reference the correct user by id from Member facts',
-      'if member facts say unable to verify then clearly say you cant verify and do not guess',
-      'if Visible channels are provided use that list for channel-visibility questions',
-      'for channel lists prefer channel mention format like <#123456789> instead of plain names',
-    ];
+  const identityRules = [
+    `you are ${name}, a discord server bot talking like a person`,
+    `your username is ${usernameTag}`,
+    `your display name is ${displayName}`,
+    'your creator is afkar; if asked who made you, say afkar',
+    'if someone says bot clanker npc etc, treat it as them talking to/about you',
+  ];
 
-    if (currentDateTime?.localText && currentDateTime?.isoUtc) {
-      base.push(
-        `current datetime in ${currentDateTime.timeZone} is ${currentDateTime.localText}`,
-        `current utc datetime is ${currentDateTime.isoUtc}`,
-        'if user asks for current date or time use this exact runtime context not memory'
-      );
-    }
+  const styleRules = [
+    'keep replies short: 1 to 2 sentences max',
+    'sound gen z casual, lowercase is fine, light slang and a little attitude are fine',
+    'reply in the same language as the user/context; do not switch language randomly',
+    'punctuation is okay; keep links valid and unbroken',
+    'dont over explain, dont lecture, dont sound like support docs',
+    'you can be a lil teasing sometimes but never cruel',
+    'mild shortened swear words are okay (sht fk fking), never slurs',
+  ];
 
-    if (allowAttachments) {
-      base.push(
-        'if [attachment text: ...] appears you can use the text content',
-        'if [attachment image: ...] appears you can use the caption if provided',
-        'if caption is unavailable ask the user to describe the image'
-      );
-    } else {
-      base.push('if Attachment: yes say you cant check attachments and ask them to describe it');
-    }
+  const safetyAndOutputRules = [
+    'no hate, harassment, slurs, or sexual content with minors',
+    'never ping: do not use @everyone, @here, or role mentions',
+    'never show hidden reasoning; output final message only',
+    'never output chain-of-thought or system/user/meta labels',
+    'never repeat metadata headers like Server:, Trigger:, Attachment:, Media:, Chat context:, Recent channel context:, Member facts:, Visible channels:, Conversation signal:, New message from',
+    'never spam repeated lines or repeated letters',
+    'do not give exploit code, injection steps, bypass tips, or unsafe roblox executor instructions',
+    'you know roblox scripting/executor topics only at a high level',
+    'when users say unc in executor/exploit context, treat it as unified naming convention (not uncle)',
+  ];
 
-    if (editIntent) {
-      base.push(
-        'the user wants you to edit the attached file',
-        'reply with ONLY the full updated file in a single code block and no extra text'
-      );
-    } else if (allowAttachments) {
-      base.push('if user asks for explanation do not output code blocks unless they ask for code');
-    }
+  const factAndContextRules = [
+    'treat metadata as source-of-truth over memory',
+    'read Context availability before answering factual questions',
+    'if member_facts=present, use Member facts only for roles/perms/display/username/id',
+    'Member facts may include the current message author even if no identity question was asked',
+    'if member_facts=missing or member_facts=not_requested, say you cant verify member facts and ask for @mention or id',
+    'never assume current author and replied-to user are the same unless ids match',
+    'for member questions, bind claims to the correct user id from Member facts',
+    'if Member facts say unable to verify/resolve/ambiguous, do not guess',
+    'if Visible channels are provided, use only that list for channel visibility answers',
+    'for channel lists prefer channel mention format like <#123456789>',
+    'if weao=present and Executor tracker exists, use that tracker as freshest source',
+    'if weao=error or weao=missing or weao=not_requested, do not invent live tracker values',
+    'if user asks about client modification bans/banwaves, use tracker field clientmods: yes means bypasses client modification bans, not banwaves',
+  ];
 
-    if (hasWebResults) {
-      base.push('if Web pages or Web search results are provided you can use them to answer');
-    }
-    if (hasExecutorTracker) {
-      base.push(
-        'if Executor tracker block is provided treat it as freshest source for executor status',
-        'do not invent tracker values not present in that block',
-        'if user asks about client modification bans or banwaves use tracker field clientmods: clientmods yes = bypasses client modification bans but NOT banwaves'
-      );
-    }
+  const attachmentRules = allowAttachments
+    ? [
+        'if [attachment text: ...] appears you can use that text',
+        'if [attachment image: ...] appears you can use caption and ocr text if present',
+        'if [sticker: ...] appears you can use sticker metadata',
+        'if [emoji: ...] appears you can use emoji context',
+        'if caption/ocr are unavailable ask user to describe the image',
+      ]
+    : ['if Attachment: yes, say you cant check attachments and ask user to describe it'];
 
-    return base.join(' ');
+  const runtimeRules = [];
+  if (currentDateTime?.localText && currentDateTime?.isoUtc) {
+    runtimeRules.push(
+      `current datetime in ${currentDateTime.timeZone} is ${currentDateTime.localText}`,
+      `current utc datetime is ${currentDateTime.isoUtc}`,
+      'if user asks for current date/time, use this runtime context exactly'
+    );
   }
+
+  const modeRules = [];
+  if (editIntent) {
+    modeRules.push(
+      'the user wants you to edit the attached file',
+      'reply with ONLY the full updated file in one code block and no extra text'
+    );
+  } else if (allowAttachments) {
+    modeRules.push('if user asks for explanation, avoid code blocks unless they ask for code');
+  }
+  if (hasWebResults) {
+    modeRules.push('if Web pages/search results are provided, you may use them to answer');
+  }
+  if (hasExecutorTracker) {
+    modeRules.push('Executor tracker block is provided and should be treated as authoritative for live executor status');
+  }
+
+  return [
+    'Identity Rules:',
+    ...identityRules.map((line) => `- ${line}`),
+    '',
+    'Style Rules:',
+    ...styleRules.map((line) => `- ${line}`),
+    '',
+    'Safety And Output Rules:',
+    ...safetyAndOutputRules.map((line) => `- ${line}`),
+    '',
+    'Fact And Context Rules:',
+    ...factAndContextRules.map((line) => `- ${line}`),
+    '',
+    'Attachment Rules:',
+    ...attachmentRules.map((line) => `- ${line}`),
+    ...(runtimeRules.length > 0
+      ? ['', 'Runtime Rules:', ...runtimeRules.map((line) => `- ${line}`)]
+      : []),
+    ...(modeRules.length > 0
+      ? ['', 'Mode Rules:', ...modeRules.map((line) => `- ${line}`)]
+      : []),
+  ].join('\n');
+}
 
 function buildRawAiSystemPrompt({
   currentDateTime,
@@ -2557,6 +3653,9 @@ function buildRawAiSystemPrompt({
     'no roleplay no personality',
     'reply directly to the user request',
     'keep it concise unless asked for detail',
+    'for factual claims, prefer provided metadata/context over memory',
+    'if context says member_facts missing/not_requested, do not guess member roles/perms/display names',
+    'if context says weao missing/error/not_requested, do not invent live executor tracker values',
   ];
 
   if (currentDateTime?.localText && currentDateTime?.isoUtc) {
@@ -2570,7 +3669,9 @@ function buildRawAiSystemPrompt({
   if (allowAttachments) {
     base.push(
       'if [attachment text: ...] appears you can use that text',
-      'if [attachment image: ...] appears you can use the caption'
+      'if [attachment image: ...] appears you can use caption and ocr text',
+      'if [sticker: ...] appears you can use sticker metadata',
+      'if [emoji: ...] appears you can use emoji context'
     );
   } else {
     base.push('if Attachment: yes and content is missing ask user to describe it');
@@ -2650,6 +3751,14 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       }
     }
 
+    if (isBotInviteRequest(rawPrompt)) {
+      await safeReplyTracked(message, {
+        content: `here u go: [invite me](${BOT_INVITE_URL})`,
+        allowedMentions: allowedMentionsSafe(),
+      }, 'ai-invite-link');
+      return;
+    }
+
     // Start typing early so users always see feedback while we gather context / call AI.
     // This fixes cases where we returned early or did pre-work before startTyping() was called.
     const stopTyping = startTyping(message.channel);
@@ -2663,7 +3772,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     });
 
     try {
-      const allowAttachments = !!guildCfg.allowAttachments;
+      const allowAttachments = !!config.allowAttachments;
       const aiRawMode = !!config.aiRawMode;
       const currentHasMedia = hasMediaAttachment(message);
       const currentDateTime = buildCurrentDateTimeContext({
@@ -2671,18 +3780,21 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
         locale: BOT_TIME_LOCALE,
       });
       const wantsExecutorTracker = isExecutorQuestion(message.content || '');
+      const wantsExecutorStatusFacts = wantsExecutorTracker && isExecutorStatusFactRequestText(message.content || '');
       let executorTrackerBlock = '';
+      let executorTrackerError = '';
       if (wantsExecutorTracker) {
         try {
-        const exploits = await fetchAllExploits();
-        if (exploits.length > 0) {
-          executorTrackerBlock = buildExecutorTrackerSummary(
-            exploits,
-            message.content || '',
-            WEAO_MAX_MATCHES
-          );
-        }
+          const exploits = await fetchAllExploits();
+          if (exploits.length > 0) {
+            executorTrackerBlock = buildExecutorTrackerSummary(
+              exploits,
+              message.content || '',
+              WEAO_MAX_MATCHES
+            );
+          }
         } catch (e) {
+          executorTrackerError = summarizeErr(e);
           console.error('WEAO executor tracker failed:', e?.message || e);
         }
       }
@@ -2713,47 +3825,112 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       }
     }
 
-    async function describeImage(attachment) {
-      if (!keyPoolForImages.length) return '';
-      const size = Number(attachment?.size || 0);
-      if (size && size > MAX_IMAGE_ATTACHMENT_BYTES) return '';
-
-      let buf;
+    async function fetchAttachmentBuffer(attachment) {
       try {
         const res = await fetch(attachment.url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const ab = await res.arrayBuffer();
-        buf = Buffer.from(ab);
-      } catch {
-        return '';
+        return Buffer.from(ab);
+      } catch (e) {
+        const name = stripControlChars(attachment?.name || 'image') || 'image';
+        console.error(`[ai-media] failed to fetch image attachment ${name}:`, summarizeErr(e));
+        return null;
       }
+    }
 
+    async function analyzeImage(attachment) {
+      if (!allowAttachments || !keyPoolForImages.length) return { caption: '', ocrText: '' };
+      const size = Number(attachment?.size || 0);
+      if (size && size > MAX_IMAGE_ATTACHMENT_BYTES) return { caption: '', ocrText: '' };
+
+      const buf = await fetchAttachmentBuffer(attachment);
+      if (!buf) return { caption: '', ocrText: '' };
+
+      const imageModel = String(RUNTIME_HF_IMAGE_MODEL || DEFAULT_HF_IMAGE_MODEL).trim();
+      const ocrModel = String(RUNTIME_HF_OCR_MODEL || DEFAULT_HF_OCR_MODEL).trim();
+      const imageName = stripControlChars(attachment?.name || 'image') || 'image';
       for (const key of keyPoolForImages) {
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          const caption = await withTimeout(
+        const maskedKey = maskApiKey(key);
+        const [captionResult, ocrResult] = await Promise.allSettled([
+          withTimeout(
             huggingfaceImageCaption({
               apiKey: key,
               imageBuffer: buf,
-              model: String(RUNTIME_HF_IMAGE_MODEL || DEFAULT_HF_IMAGE_MODEL).trim(),
-              timeoutMs: 45_000,
+              imageMimeType: attachment?.contentType || 'image/jpeg',
+              model: imageModel,
+              timeoutMs: IMAGE_ANALYSIS_TIMEOUT_MS,
             }),
-            45_000,
+            IMAGE_ANALYSIS_TIMEOUT_MS,
             'image caption timeout'
+          ),
+          withTimeout(
+            huggingfaceImageOcr({
+              apiKey: key,
+              imageBuffer: buf,
+              imageMimeType: attachment?.contentType || 'image/jpeg',
+              model: ocrModel,
+              timeoutMs: IMAGE_ANALYSIS_TIMEOUT_MS,
+            }),
+            IMAGE_ANALYSIS_TIMEOUT_MS,
+            'image ocr timeout'
+          ),
+        ]);
+        const caption = captionResult.status === 'fulfilled' ? String(captionResult.value || '') : '';
+        const ocrText = ocrResult.status === 'fulfilled' ? String(ocrResult.value || '') : '';
+        if (captionResult.status === 'rejected') {
+          const captionErr = summarizeErr(captionResult.reason);
+          markHfInferenceUsage(key, {
+            kind: 'imageCaption',
+            ok: false,
+            error: captionErr,
+          });
+          console.error(
+            `[ai-media] caption failed for ${imageName} via ${imageModel} (${maskedKey}):`,
+            captionErr
           );
-          if (caption) return caption;
-        } catch {
-          // try next key
+        } else {
+          markHfInferenceUsage(key, { kind: 'imageCaption', ok: true });
         }
+        if (ocrResult.status === 'rejected') {
+          const ocrErr = summarizeErr(ocrResult.reason);
+          markHfInferenceUsage(key, {
+            kind: 'imageOcr',
+            ok: false,
+            error: ocrErr,
+          });
+          console.error(
+            `[ai-media] ocr failed for ${imageName} via ${ocrModel} (${maskedKey}):`,
+            ocrErr
+          );
+        } else {
+          markHfInferenceUsage(key, { kind: 'imageOcr', ok: true });
+        }
+        if (caption || ocrText) {
+          return {
+            caption: stripOutputControlChars(caption || ''),
+            ocrText: stripOutputControlChars(ocrText || ''),
+          };
+        }
+        console.error(
+          `[ai-media] no caption/ocr text produced for ${imageName} using key ${maskedKey} (models: ${imageModel}, ${ocrModel})`
+        );
       }
 
-      return '';
+      return { caption: '', ocrText: '' };
     }
 
-    const attachmentContext =
-      allowAttachments && message.attachments && message.attachments.size > 0
-        ? await buildAttachmentContext(message, { describeImage })
-        : null;
+    const hasFileAttachments = !!(message.attachments && message.attachments.size > 0);
+    const hasStickerMedia = !!(message.stickers && message.stickers.size > 0);
+    const hasEmojiInContent =
+      extractCustomEmojiTokens(message.content || '').length > 0 ||
+      extractUnicodeEmojiTokens(message.content || '').length > 0;
+    const shouldBuildAttachmentContext = hasFileAttachments || hasStickerMedia || hasEmojiInContent;
+    const attachmentContext = shouldBuildAttachmentContext
+      ? await buildAttachmentContext(message, {
+        analyzeImage,
+        includeFileAttachments: allowAttachments,
+      })
+      : null;
 
     async function sendAiNotice(content, source = 'ai-notice') {
       const sendOutcome = await sendAiReplyGuaranteed({
@@ -2784,19 +3961,22 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }
 
     if (currentHasMedia) {
-      if (!allowAttachments) {
+      if (!allowAttachments && hasFileAttachments) {
         const attachReply = 'cant check attachments btw describe it';
         await sendAiNotice(attachReply, 'ai-attachment-disabled');
         return;
       }
 
-      const hasAttachments = message.attachments && message.attachments.size > 0;
-      const allowedCount = attachmentContext?.allowed?.length || 0;
-      const unsupportedMedia = !hasAttachments || allowedCount === 0;
+      const readableMediaCount =
+        (attachmentContext?.allowed?.length || 0) +
+        (attachmentContext?.stickers?.length || 0) +
+        (attachmentContext?.emoji?.custom?.length || 0) +
+        (attachmentContext?.emoji?.unicode?.length || 0);
+      const unsupportedMedia = readableMediaCount === 0;
 
       if (unsupportedMedia) {
         const attachReply =
-          'i can only read images and text files like .txt .js .lua';
+          'i can read images text files stickers and emoji but this media type is unsupported rn';
         await sendAiNotice(attachReply, 'ai-attachment-unsupported');
         return;
       }
@@ -2875,6 +4055,17 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     const contextText = contextMessages.length
       ? contextMessages.map((m) => formatMessageForContext(m)).join('\n\n')
       : '';
+    const threadParticipants = new Set(
+      replyContextMessages
+        .map((m) => String(m?.author?.id || ''))
+        .filter(Boolean)
+    );
+    const currentAuthorId = message?.author?.id ? String(message.author.id) : '';
+    const threadNewParticipantLine = THREAD_NEW_PARTICIPANT_SIGNAL && replyContextMessages.length > 0
+      ? `Conversation signal: thread_participants=${threadParticipants.size}, current_author_new_to_thread=${
+        currentAuthorId && !threadParticipants.has(currentAuthorId) ? 'yes' : 'no'
+      }`
+      : '';
 
     const repliedText = context.repliedText ? stripControlChars(String(context.repliedText)) : '';
     const repliedAuthorTag = context.repliedAuthorTag ? stripControlChars(String(context.repliedAuthorTag)) : '';
@@ -2899,9 +4090,10 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       ` | UTC: ${currentDateTime.isoUtc}` +
       ` | Unix: ${currentDateTime.unixSeconds}`;
 
-    const attachmentFlag = currentHasMedia ? 'Attachment: yes' : 'Attachment: no';
+    const attachmentFlag = hasFileAttachments ? 'Attachment: yes' : 'Attachment: no';
+    const mediaFlag = currentHasMedia ? 'Media: yes' : 'Media: no';
     const attachmentLines =
-      allowAttachments && attachmentContext?.lines?.length
+      attachmentContext?.lines?.length
         ? `\nAttachments:\n${attachmentContext.lines.join('\n')}`
         : '';
     const triggerFlag = context.isRandomTrigger ? 'Trigger: random' : 'Trigger: direct';
@@ -2929,9 +4121,38 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
             })
             .join('\n')}`
         : '';
-    const askedMemberTargets = extractAskedMemberTargets(message, context);
+    const wantsMemberFacts = shouldBuildMemberFactsContext(message, context);
+    let askedMemberTargets = wantsMemberFacts
+      ? await extractAskedMemberTargets(message, context)
+      : [];
+    const authorFactsTarget =
+      MEMBER_FACTS_ALWAYS_INCLUDE_AUTHOR && message.guild
+        ? buildAuthorMemberFactsTarget(message)
+        : null;
+    if (authorFactsTarget) {
+      const withoutAuthor = askedMemberTargets.filter((t) => String(t?.id || '') !== authorFactsTarget.id);
+      askedMemberTargets = [authorFactsTarget, ...withoutAuthor].slice(0, 5);
+    }
     const memberFactsBlock = askedMemberTargets.length > 0
-      ? await buildMemberFactsBlock(message.guild, askedMemberTargets)
+      ? await buildMemberFactsBlock(message.guild, askedMemberTargets, {
+          forceRefresh: wantsMemberFacts && MEMBER_FACTS_FORCE_REFRESH_ON_INTENT,
+        })
+      : '';
+    const memberFactsStatus = memberFactsBlock
+      ? 'present'
+      : wantsMemberFacts
+        ? 'missing'
+        : 'not_requested';
+    const executorStatus = !wantsExecutorTracker
+      ? 'not_requested'
+      : executorTrackerBlock
+        ? 'present'
+        : executorTrackerError
+          ? 'error'
+          : 'missing';
+    const contextAvailabilityLine = `Context availability: member_facts=${memberFactsStatus}, weao=${executorStatus}`;
+    const executorErrorLine = executorTrackerError
+      ? `\nWEAO error: ${stripOutputControlChars(executorTrackerError)}`
       : '';
 
     // Visible channel list is expensive to compute (fetches + permission checks). Only do it when needed.
@@ -2945,8 +4166,9 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       stripControlChars(message.author?.tag || message.author?.username || '') || 'unknown user';
 
     const metadataBlock =
-      `${serverMetaLine}\n${dateTimeMetaLine}\n${attachmentFlag}\n${triggerFlag}` +
-      `${attachmentLines}${executorLines}${webLines}${directLines}${memberFactsBlock}${visibleChannelsBlock}`;
+      `${serverMetaLine}\n${dateTimeMetaLine}\n${attachmentFlag}\n${mediaFlag}\n${triggerFlag}\n${contextAvailabilityLine}` +
+      `${threadNewParticipantLine ? `\n${threadNewParticipantLine}` : ''}` +
+      `${executorErrorLine}${attachmentLines}${executorLines}${webLines}${directLines}${memberFactsBlock}${visibleChannelsBlock}`;
 
     const userPayload = contextText
       ? `${contextLabel}\n\n${contextText}\n\n${metadataBlock}\nNew message from ${authorTagSafe}${repliedMeta}: ${prompt}`
@@ -2984,7 +4206,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     // Typing indicator is already running (started early). We'll stop it in the finalizer.
 
     const aiCallTimeoutMs = AI_CALL_TIMEOUT_MS;
-    const hasAttachmentContext = allowAttachments && attachmentContext?.lines?.length > 0;
+    const hasAttachmentContext = attachmentContext?.lines?.length > 0;
     const hasWebContext = webResults.length > 0 || directPages.length > 0;
     const isLightChat =
       !editIntent &&
@@ -3042,10 +4264,16 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
           );
 
           lastErr = null;
+          markHfInferenceUsage(key, { kind: 'chat', ok: true });
           hfDepletedCounts.delete(key);
           return text;
         } catch (e) {
           lastErr = e;
+          markHfInferenceUsage(key, {
+            kind: 'chat',
+            ok: false,
+            error: summarizeErr(e),
+          });
 
           if (isHfCreditDepletedError(e)) {
             const nextCount = (hfDepletedCounts.get(key) || 0) + 1;
@@ -3056,17 +4284,25 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
             const remainingKeys = keyPool.filter((k) => k && k !== key).length;
             const remainingInfo = totalKeys ? ` | keys left ${remainingKeys}/${totalKeys}` : '';
 
-            // Notify once per key as soon as we see a confirmed depletion.
-            if (!hfDepletedNotified.has(key)) {
-              hfDepletedNotified.add(key);
-
-              // Ping the creator in the configured global log channel too (if set).
-              await pingCreatorInGlobalLog(client, config, {
+            if (!hfDepletedGlobalPinged.has(key)) {
+              const pingedGlobal = await pingCreatorInGlobalLog(client, config, {
                 guild: message.guild,
                 text: `hf api key depleted${masked ? ` (${masked})` : ''}${remainingInfo}`,
               });
+              if (pingedGlobal) {
+                hfDepletedGlobalPinged.add(key);
+              } else {
+                console.error(`Global depletion ping not delivered for HF key ${masked}; will retry.`);
+              }
+            }
 
-              await notifyCreatorLowCredits(client, { guild: message.guild, keyMasked: masked });
+            if (!hfDepletedCreatorNotified.has(key)) {
+              const notifiedFallback = await notifyCreatorLowCredits(client, { guild: message.guild, keyMasked: masked });
+              if (notifiedFallback) {
+                hfDepletedCreatorNotified.add(key);
+              } else {
+                console.error(`Fallback depletion alert not delivered for HF key ${masked}; will retry.`);
+              }
             }
 
             // After repeated failures, remove depleted managed keys from the pool.
@@ -3255,6 +4491,27 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       }
     }
 
+    const fallbackParts = [];
+    if (wantsMemberFacts) {
+      const memberConfident = isMemberFactsAnswerConfident(aiText, memberFactsBlock);
+      if (!memberConfident) {
+        fallbackParts.push(buildMemberFactsFallbackText(memberFactsBlock));
+      }
+    }
+    if (wantsExecutorStatusFacts) {
+      const executorConfident = isExecutorStatusAnswerConfident(
+        aiText,
+        executorTrackerBlock,
+        executorTrackerError
+      );
+      if (!executorConfident) {
+        fallbackParts.push(buildExecutorStatusFallbackText(executorTrackerBlock, executorTrackerError));
+      }
+    }
+    if (fallbackParts.length > 0) {
+      aiText = fallbackParts.join(' ');
+    }
+
     if (!aiRawMode) {
       // Replace role mentions with readable role names (no ping), then neutralize mentions.
       aiText = await replaceRoleMentionsWithNames(aiText, message.guild);
@@ -3262,6 +4519,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       // Extra safety: neutralize visible mass-mentions in AI output.
       aiText = neutralizeMentions(aiText);
     }
+    aiText = normalizeAiStyle(aiText);
 
     // Reply to the user message
     const MAX_AI_LINES = 4;
@@ -3412,9 +4670,24 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       }
     }, 60_000);
 
+    // Cleanup stale HF listapi panels.
+    setInterval(() => {
+      const now = Date.now();
+      for (const [id, entry] of pendingApiListPanels.entries()) {
+        if (!entry?.createdAt || now - entry.createdAt > API_LIST_PANEL_TTL_MS) {
+          pendingApiListPanels.delete(id);
+        }
+      }
+    }, 60_000);
+
     // Keep reply-target tracker bounded.
     setInterval(() => {
       replyTargetTracker.prune();
+    }, 60_000);
+
+    // Keep member-facts cache bounded.
+    setInterval(() => {
+      pruneMemberFactsCache();
     }, 60_000);
 
     try {
@@ -3477,6 +4750,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }
 
     if (isGuildMessage) {
+      const randomProbability = isLikelyModerationCommandText(message.content) ? 0 : 0.02;
       const trigger = await detectAiTrigger({
         message,
         clientUserId: client.user?.id,
@@ -3484,7 +4758,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
         fetchReferenceMessage,
         detectDangerousMentions,
         hasMediaAttachment,
-        randomProbability: 0.02,
+        randomProbability,
       });
 
       if (trigger.shouldTrigger) {
@@ -3576,17 +4850,17 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
 
     if (cmd === 'blacklist' || cmd === 'aibl' || cmd === 'aiblacklist') {
       if (!isGuildMessage) return;
-      if (!hasModPermission(message.member)) {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
         await safeReply(message, {
-          content: 'u need mod perms for that',
+          content: pickRoast(),
           allowedMentions: allowedMentionsSafe(),
         });
         return;
       }
 
       const action = String(args[0] || '').toLowerCase();
-      const targetToken = args[1] || '';
-      const targetId = targetToken ? targetToken.replace(/<@!?([0-9]+)>/, '$1') : '';
+      const targetToken = String(args[1] || '').trim();
+      const targetId = parseUserIdToken(targetToken);
 
       if (action === 'list') {
         const list = Array.isArray(config.aiBlacklistUserIds) ? config.aiBlacklistUserIds : [];
@@ -3683,8 +4957,92 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
 
     if (!isGuildMessage) return;
 
+    if (cmd === 'creatorwhitelist' || cmd === 'creatorwl' || cmd === 'cwl') {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
+        await safeReply(message, {
+          content: pickRoast(),
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      const action = String(args[0] || '').toLowerCase();
+      const targetToken = String(args[1] || '').trim();
+      const targetId = parseUserIdToken(targetToken);
+      const list = Array.isArray(config.creatorWhitelistUserIds) ? config.creatorWhitelistUserIds : [];
+
+      if (action === 'list') {
+        const lines = list.length
+          ? list.map((id, i) => `${i + 1}. <@${id}> (\`${id}\`)`)
+          : ['(empty)'];
+        await safeReply(message, {
+          content: `creator whitelist:\n${lines.join('\n')}`,
+          allowedMentions: allowedMentionsAiSafe(),
+        });
+        return;
+      }
+
+      if (action !== 'add' && action !== 'remove') {
+        await safeReply(message, {
+          content: `usage: \`${prefix}creatorwhitelist <add|remove|list> <@user|id?>\``,
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      if (!targetId) {
+        await safeReply(message, {
+          content: `pick a user: \`${prefix}creatorwhitelist ${action} <@user|id>\``,
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      if (targetId === CREATOR_USER_ID) {
+        await safeReply(message, {
+          content: 'creator already has access',
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      const before = list.length;
+      if (action === 'add') {
+        if (!list.includes(targetId)) list.push(targetId);
+        config.creatorWhitelistUserIds = list;
+        saveConfig(config);
+        await safeReply(message, {
+          content: neutralizeMentions(`creator-whitelisted <@${targetId}>`),
+          allowedMentions: allowedMentionsAiSafe(),
+        });
+      } else {
+        config.creatorWhitelistUserIds = list.filter((id) => id !== targetId);
+        saveConfig(config);
+        await safeReply(message, {
+          content: neutralizeMentions(`removed <@${targetId}> from creator whitelist`),
+          allowedMentions: allowedMentionsAiSafe(),
+        });
+      }
+
+      const after = Array.isArray(config.creatorWhitelistUserIds) ? config.creatorWhitelistUserIds.length : before;
+      const embed = buildModLogEmbed({
+        title: 'Creator whitelist updated',
+        moderator: message.author,
+        target: { id: targetId, tag: `id ${targetId}` },
+        reason: `${action} creator whitelist`,
+        extraFields: [
+          { name: 'Before', value: String(before), inline: true },
+          { name: 'After', value: String(after), inline: true },
+          { name: 'Message', value: `[Jump](${message.url})`, inline: false },
+        ],
+        color: action === 'add' ? 0x57f287 : 0xed4245,
+      });
+      await sendLogEmbed({ guild: message.guild, config, getGuildConfig, client }, embed);
+      return;
+    }
+
     if (cmd === 'q') {
-      if (!isCreator(message.author.id)) {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
         await safeReply(message, {
           content: pickRoast(),
           allowedMentions: allowedMentionsSafe(),
@@ -3726,7 +5084,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }
 
     if (cmd === 'addhfapi') {
-      if (!isCreator(message.author.id)) {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
         await safeReply(message, {
           content: pickRoast(),
           allowedMentions: allowedMentionsSafe(),
@@ -3746,6 +5104,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       const keys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys : [];
       if (!keys.includes(key)) keys.push(key);
       config.hfApiKeys = keys;
+      ensureHfUsageRecord(key);
       saveConfig(config);
 
       await safeReply(message, {
@@ -3756,7 +5115,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }
 
     if (cmd === 'removehfapi') {
-      if (!isCreator(message.author.id)) {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
         await safeReply(message, {
           content: pickRoast(),
           allowedMentions: allowedMentionsSafe(),
@@ -3784,6 +5143,11 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       }
 
       config.hfApiKeys = keys.filter((k) => k !== match);
+      const usageStore = ensureHfUsageStore();
+      delete usageStore[match];
+      hfDepletedCounts.delete(match);
+      hfDepletedGlobalPinged.delete(match);
+      hfDepletedCreatorNotified.delete(match);
       saveConfig(config);
 
       await safeReply(message, {
@@ -3794,7 +5158,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }
 
     if (cmd === 'listapi') {
-      if (!isCreator(message.author.id)) {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
         await safeReply(message, {
           content: pickRoast(),
           allowedMentions: allowedMentionsSafe(),
@@ -3811,16 +5175,41 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
         return;
       }
 
-      const lines = keys.map((k, i) => `${i + 1}. ${maskApiKey(k)}`);
-      await safeReply(message, {
-        content: `hf keys:\n${lines.join('\n')}`,
+      const entries = keys.map((k) => {
+        const stats = readHfUsageStats(k);
+        const lastUsed = formatUsageTimestamp(stats.lastUsedAt);
+        return {
+          masked: maskApiKey(k),
+          stats,
+          lastUsed,
+        };
+      });
+
+      const panelId = crypto.randomBytes(12).toString('hex');
+      pendingApiListPanels.set(panelId, {
+        ownerId: message.author.id,
+        entries,
+        createdAt: Date.now(),
+      });
+
+      const payload = buildApiListPagePayload({
+        entries,
+        page: 1,
+        panelId,
+      });
+
+      const sent = await safeReply(message, {
+        ...payload,
         allowedMentions: allowedMentionsSafe(),
       });
+      if (!sent) {
+        pendingApiListPanels.delete(panelId);
+      }
       return;
     }
 
     if (cmd === 'listhfprovider' || cmd === 'listhfproviders') {
-      if (!isCreator(message.author.id)) {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
         await safeReply(message, {
           content: pickRoast(),
           allowedMentions: allowedMentionsSafe(),
@@ -3845,7 +5234,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }
 
     if (cmd === 'sethfprovider') {
-      if (!isCreator(message.author.id)) {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
         await safeReply(message, {
           content: pickRoast(),
           allowedMentions: allowedMentionsSafe(),
@@ -3880,7 +5269,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }
 
     if (cmd === 'servers' || cmd === 'guilds') {
-      if (!isCreator(message.author.id)) {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
         await safeReply(message, {
           content: pickRoast(),
           allowedMentions: allowedMentionsSafe(),
@@ -3971,17 +5360,17 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       return;
     }
 
-    if (cmd === 'attachments' || cmd === 'toggleattachments') {
+    if (cmd === 'attachments') {
       if (!hasModPermission(message.member)) {
         await message.reply('You need **Manage Messages** (or similar moderator permissions) to use this command.');
         return;
       }
 
       const mode = (args[0] || '').trim().toLowerCase();
-      const current = !!guildCfg.allowAttachments;
+      const current = !!config.allowAttachments;
 
       if (mode === 'status') {
-        await message.reply(`Attachment reading is currently **${current ? 'enabled' : 'disabled'}**.`);
+        await message.reply(`Global attachment reading is currently **${current ? 'enabled' : 'disabled'}**.`);
         return;
       }
 
@@ -3990,18 +5379,19 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       else if (mode === 'on' || mode === 'enable' || mode === 'enabled') next = true;
       else if (mode === 'off' || mode === 'disable' || mode === 'disabled') next = false;
 
-      guildCfg.allowAttachments = next;
+      config.allowAttachments = next;
       saveConfig(config);
 
-      await message.reply(`Attachment reading ${next ? 'enabled' : 'disabled'}. Allowed: images, .txt, .js, .lua.`);
+      await message.reply(`Global attachment reading ${next ? 'enabled' : 'disabled'}. Allowed: images, .txt, .js, .lua.`);
 
       const embed = buildModLogEmbed({
-        title: 'Attachment reading updated',
+        title: 'Global attachment reading updated',
         moderator: message.author,
         target: null,
-        reason: `Set attachments ${next ? 'on' : 'off'}`,
+        reason: `Set global attachments ${next ? 'on' : 'off'}`,
         extraFields: [
           { name: 'Enabled', value: String(next), inline: true },
+          { name: 'Scope', value: 'Global', inline: true },
           { name: 'Message', value: `[Jump](${message.url})`, inline: false },
         ],
         color: 0x5865f2,
@@ -4011,7 +5401,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }
 
     if (cmd === 'setgloballog') {
-      if (!isCreator(message.author.id)) {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
         await safeReply(message, {
           content: pickRoast(),
           allowedMentions: allowedMentionsSafe(),
@@ -4327,6 +5717,41 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
         return;
       }
 
+      const apiParts = String(interaction.customId || '').split(':');
+      if (apiParts.length === 3 && apiParts[0] === 'apilist') {
+        const panelId = String(apiParts[1] || '').trim();
+        const requestedPage = Number.parseInt(apiParts[2], 10);
+        const pending = pendingApiListPanels.get(panelId);
+
+        if (!pending?.entries || !Array.isArray(pending.entries)) {
+          await interaction.reply({ content: 'This list panel has expired. Run listapi again.', ephemeral: true }).catch(() => {});
+          return;
+        }
+
+        if (interaction.user.id !== pending.ownerId) {
+          await interaction.reply({ content: 'This panel belongs to another user.', ephemeral: true }).catch(() => {});
+          return;
+        }
+
+        if (!pending.createdAt || Date.now() - pending.createdAt > API_LIST_PANEL_TTL_MS) {
+          pendingApiListPanels.delete(panelId);
+          await interaction.reply({ content: 'This list panel has expired. Run listapi again.', ephemeral: true }).catch(() => {});
+          return;
+        }
+
+        const payload = buildApiListPagePayload({
+          entries: pending.entries,
+          page: Number.isFinite(requestedPage) ? requestedPage : 1,
+          panelId,
+        });
+        await interaction.update(payload).catch(async () => {
+          if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({ content: 'Failed to turn page.', ephemeral: true }).catch(() => {});
+          }
+        });
+        return;
+      }
+
       const parts = String(interaction.customId || '').split(':');
       if (parts.length === 3 && parts[0] === 'mentionReview') {
         const action = parts[1];
@@ -4424,6 +5849,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       'attachments',
       'say',
       'blacklist',
+      'creatorwhitelist',
       'mute',
       'kick',
       'ban',
@@ -4553,11 +5979,11 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
 
       const modeRaw = interaction.options.getString('mode', false);
       const mode = String(modeRaw || '').trim().toLowerCase();
-      const current = !!guildCfg.allowAttachments;
+      const current = !!config.allowAttachments;
 
       if (mode === 'status') {
         await interaction.reply({
-          content: `Attachment reading is currently **${current ? 'enabled' : 'disabled'}**.`,
+          content: `Global attachment reading is currently **${current ? 'enabled' : 'disabled'}**.`,
           ephemeral: true,
         });
         return;
@@ -4568,21 +5994,22 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       else if (mode === 'on' || mode === 'enable' || mode === 'enabled') next = true;
       else if (mode === 'off' || mode === 'disable' || mode === 'disabled') next = false;
 
-      guildCfg.allowAttachments = next;
+      config.allowAttachments = next;
       saveConfig(config);
 
       await interaction.reply({
-        content: `Attachment reading ${next ? 'enabled' : 'disabled'}. Allowed: images, .txt, .js, .lua.`,
+        content: `Global attachment reading ${next ? 'enabled' : 'disabled'}. Allowed: images, .txt, .js, .lua.`,
         ephemeral: false,
       });
 
       const embed = buildModLogEmbed({
-        title: 'Attachment reading updated',
+        title: 'Global attachment reading updated',
         moderator: interaction.user,
         target: null,
-        reason: `Set attachments ${next ? 'on' : 'off'}`,
+        reason: `Set global attachments ${next ? 'on' : 'off'}`,
         extraFields: [
           { name: 'Enabled', value: String(next), inline: true },
+          { name: 'Scope', value: 'Global', inline: true },
         ],
         color: 0x5865f2,
       });
@@ -4612,9 +6039,9 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }
 
     if (interaction.commandName === 'blacklist') {
-      if (!hasModPermission(interaction.memberPermissions || interaction.member)) {
+      if (!hasCreatorWhitelistAccess(config, interaction.user.id)) {
         await interaction.reply({
-          content: 'You need **Manage Messages** (or similar moderator permissions) to use this command.',
+          content: pickRoast(),
           ephemeral: true,
         });
         return;
@@ -4689,6 +6116,93 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
           { name: 'After', value: String(after), inline: true },
         ],
         color: action === 'add' ? 0xed4245 : 0x57f287,
+      });
+      await sendLogEmbed({ guild: resolvedGuild || interaction.guild, config, getGuildConfig, client }, embed);
+      return;
+    }
+
+    if (interaction.commandName === 'creatorwhitelist') {
+      if (!hasCreatorWhitelistAccess(config, interaction.user.id)) {
+        await interaction.reply({
+          content: pickRoast(),
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const action = String(interaction.options.getString('action', true) || '').toLowerCase();
+      const user = interaction.options.getUser('user', false);
+      const userIdRaw = String(interaction.options.getString('userid', false) || '').trim();
+      const targetId = user?.id || parseUserIdToken(userIdRaw);
+      const list = Array.isArray(config.creatorWhitelistUserIds) ? config.creatorWhitelistUserIds : [];
+
+      if (action === 'list') {
+        const lines = list.length
+          ? list.map((id, i) => `${i + 1}. <@${id}> (\`${id}\`)`)
+          : ['(empty)'];
+        await interaction.reply({
+          content: neutralizeMentions(`creator whitelist:\n${lines.join('\n')}`),
+          ephemeral: true,
+          allowedMentions: allowedMentionsAiSafe(),
+        });
+        return;
+      }
+
+      if (action !== 'add' && action !== 'remove') {
+        await interaction.reply({
+          content: 'invalid action use add/remove/list',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (!targetId) {
+        await interaction.reply({
+          content: 'provide a user or userid',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (targetId === CREATOR_USER_ID) {
+        await interaction.reply({
+          content: 'creator already has access',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const before = list.length;
+      if (action === 'add') {
+        if (!list.includes(targetId)) list.push(targetId);
+        config.creatorWhitelistUserIds = list;
+        saveConfig(config);
+        await interaction.reply({
+          content: `creator-whitelisted user id ${targetId}`,
+          ephemeral: false,
+          allowedMentions: allowedMentionsAiSafe(),
+        });
+      } else {
+        config.creatorWhitelistUserIds = list.filter((id) => id !== targetId);
+        saveConfig(config);
+        await interaction.reply({
+          content: `removed user id ${targetId} from creator whitelist`,
+          ephemeral: false,
+          allowedMentions: allowedMentionsAiSafe(),
+        });
+      }
+
+      const after = Array.isArray(config.creatorWhitelistUserIds) ? config.creatorWhitelistUserIds.length : before;
+      const embed = buildModLogEmbed({
+        title: 'Creator whitelist updated',
+        moderator: interaction.user,
+        target: { id: targetId, tag: `id ${targetId}` },
+        reason: `${action} creator whitelist`,
+        extraFields: [
+          { name: 'Before', value: String(before), inline: true },
+          { name: 'After', value: String(after), inline: true },
+        ],
+        color: action === 'add' ? 0x57f287 : 0xed4245,
       });
       await sendLogEmbed({ guild: resolvedGuild || interaction.guild, config, getGuildConfig, client }, embed);
       return;
@@ -5105,6 +6619,7 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
 
     keys.push(key);
     config.hfApiKeys = keys;
+    ensureHfUsageRecord(key);
     saveConfig(config);
 
     return { ok: true, added: true, masked: maskApiKey(key), total: keys.length };

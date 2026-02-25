@@ -42,6 +42,7 @@ function stripLeakedPromptLines(text) {
     if (lower.startsWith('trigger:')) continue;
     if (lower.startsWith('member facts:')) continue;
     if (lower.startsWith('visible channels:')) continue;
+    if (lower.startsWith('conversation signal:')) continue;
     if (lower.startsWith('new message from')) continue;
     if (lower.startsWith('they replied to this message:')) continue;
     if (lower.startsWith('replied-to user:')) continue;
@@ -65,6 +66,7 @@ function looksLikePromptLeak(text) {
   if (/(?:^|\s)trigger:\s*(direct|random)/i.test(t)) return true;
   if (/member facts:/i.test(t)) return true;
   if (/visible channels:/i.test(t)) return true;
+  if (/conversation signal:/i.test(t)) return true;
   if (/new message from/i.test(t)) return true;
   if (/they replied to this message:/i.test(t)) return true;
   if (/replied-to user:/i.test(t)) return true;
@@ -88,9 +90,6 @@ function looksLikeReasoningLeak(text) {
   const userMeta = /(the user|user is|user wants|user asked|user needs)/.test(lower);
   const selfTalk = /(i need|i should|i will|i must|i cannot|i cant|as an ai)/.test(lower);
   if (userMeta && selfTalk) return true;
-
-  const lineCount = raw.split(/\r?\n/).filter((l) => l.trim()).length;
-  if (lineCount >= 7 && raw.length > 650) return true;
 
   return false;
 }

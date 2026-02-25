@@ -49,16 +49,22 @@ function getExt(name) {
 }
 
 function slugifySegment(input, fallback = 'item') {
-  const raw = String(input || '').toLowerCase().trim();
-  const slug = raw
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 80);
+  const normalize = (value) =>
+    String(value || '')
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/\.{2,}/g, '.')
+      .replace(/^\.+|\.+$/g, '')
+      .slice(0, 80)
+      .replace(/^\.+|\.+$/g, '');
 
+  const slug = normalize(input);
   if (slug) return slug;
   const fallbackText = fallback == null ? 'item' : String(fallback);
-  return fallbackText.toLowerCase().trim();
+  return normalize(fallbackText);
 }
 
 function sanitizeRouteSegment(input) {

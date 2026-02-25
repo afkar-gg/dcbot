@@ -8,6 +8,7 @@ const {
 const EXECUTOR_TERMS = [
   'executor', 'executors', 'exploit', 'exploits', 'unc', 'sunc', 'hyperion',
   'detected', 'undetected', 'keysystem', 'keyless',
+  'weao', 'weao api', 'tracker', 'status api', 'live status', 'executor status', 'exploit status',
   // status fields / ban-related terms
   'clientmods', 'client mod', 'client mods', 'client modification', 'banwave', 'ban wave',
   // common executor names (some are generic words)
@@ -74,6 +75,11 @@ function isExecutorQuestion(text) {
   const q = normalizeText(text);
   if (!q) return false;
   if (/\b(?:executor|executors|exploit|exploits)\b/.test(q)) return true;
+  if (/\b(?:weao|tracker)\b/.test(q)) return true;
+  if (/weao\.xyz/.test(q)) return true;
+  if (/\b(?:status(?:\s+api)?|live\s+status)\b/.test(q) && /\b(?:executor|executors|exploit|exploits)\b/.test(q)) {
+    return true;
+  }
   return EXECUTOR_TERMS.some((term) => includesExecutorTerm(q, term));
 }
 

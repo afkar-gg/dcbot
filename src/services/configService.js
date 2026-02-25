@@ -13,7 +13,14 @@ function ensureDataDir() {
 function loadConfig() {
   ensureDataDir();
   if (!fs.existsSync(CONFIG_PATH)) {
-    const initial = { guilds: {}, hfApiKeys: [], globalLogChannelId: null, aiBlacklistUserIds: [] };
+    const initial = {
+      guilds: {},
+      hfApiKeys: [],
+      globalLogChannelId: null,
+      aiBlacklistUserIds: [],
+      creatorWhitelistUserIds: [],
+      allowAttachments: false,
+    };
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(initial, null, 2));
     return initial;
   }
@@ -31,6 +38,12 @@ function loadConfig() {
   if (!Array.isArray(cfg.hfApiKeys)) cfg.hfApiKeys = [];
   if (typeof cfg.globalLogChannelId === 'undefined') cfg.globalLogChannelId = null;
   if (!Array.isArray(cfg.aiBlacklistUserIds)) cfg.aiBlacklistUserIds = [];
+  if (!Array.isArray(cfg.creatorWhitelistUserIds)) cfg.creatorWhitelistUserIds = [];
+  if (typeof cfg.allowAttachments === 'undefined') {
+    // Migration from legacy per-guild toggle: if any guild had attachments on, keep behavior enabled globally.
+    const guilds = Object.values(cfg.guilds || {});
+    cfg.allowAttachments = guilds.some((g) => !!g && g.allowAttachments === true);
+  }
 
   // Persist any repairs
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
@@ -48,7 +61,6 @@ function getGuildConfig(config, guildId) {
       prefix: DEFAULT_PREFIX,
       banChannelId: null,
       logChannelId: null,
-      allowAttachments: false,
       tempBans: [],
       aiBlacklistUserIds: [],
     };
@@ -68,10 +80,6 @@ function getGuildConfig(config, guildId) {
   }
   if (typeof g.logChannelId === 'undefined') {
     g.logChannelId = null;
-    changed = true;
-  }
-  if (typeof g.allowAttachments === 'undefined') {
-    g.allowAttachments = false;
     changed = true;
   }
   if (!Array.isArray(g.tempBans)) {

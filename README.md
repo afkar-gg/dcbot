@@ -120,6 +120,8 @@ Changes the prefix for the current server.
 - Creator-only raw AI mode toggle: `s.q <on|off|toggle|status>` (turns off personality/sanitization shaping).
 - AI chat is rate-limited per user (config keys: `AI_RATE_LIMIT_PER_MINUTE`, `AI_RATE_LIMIT_PING_ONLY_PER_MINUTE`).
 - Reply detection for AI uses message tracking + fetch fallback (config: `AI_REPLY_TRACKER_MAX_IDS`, `AI_REPLY_TRACKER_TTL_MS`).
+- Member facts context can be tuned with: `AI_MEMBER_FACTS_ALWAYS_INCLUDE_AUTHOR`, `AI_MEMBER_FACTS_CACHE_TTL_MS`, `AI_MEMBER_FACTS_FORCE_REFRESH_ON_INTENT`.
+- Reply-thread participant signal (new speaker in thread context) can be toggled with `AI_THREAD_NEW_PARTICIPANT_SIGNAL`.
 - Guaranteed visible AI fallback reply can be configured with `AI_FORCE_VISIBLE_REPLY` and `AI_FALLBACK_REPLY_TEXT`.
 - Date/time answers use runtime clock context. Optional: set `BOT_TIMEZONE` (default `UTC`) and `BOT_TIME_LOCALE` (default `en-US`) in `config.json`.
 - Ban-channel enforcement uses Discord built-in ban message deletion.
