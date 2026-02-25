@@ -2,9 +2,6 @@ const {
   Client,
   GatewayIntentBits,
   ActivityType,
-  REST,
-  Routes,
-  SlashCommandBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -51,6 +48,22 @@ const { createReplyTargetTracker } = require('./ai/replyTargetTracker');
 const { detectAiTrigger } = require('./ai/triggerDetector');
 const { sendAiReplyGuaranteed } = require('./ai/replySender');
 const { createChatOrchestrator } = require('./ai/chatOrchestrator');
+const { buildSlashCommands, registerSlashCommands } = require('./discord/slashRegistry');
+const { createMentionReviewSubsystem } = require('./discord/mentionReviewSubsystem');
+const {
+  isLoadstringPrefixCommand,
+  isLoadstringSlashCommand,
+} = require('./commands/loadstringCommands');
+const {
+  MODERATION_SLASH_COMMANDS,
+} = require('./commands/moderationCommands');
+const {
+  buildAiSystemPrompt,
+  buildRawAiSystemPrompt,
+  buildStrictSystemPrompt,
+  computeDynamicTemperature,
+} = require('./ai/aiPipeline');
+const { shouldIncludeAuthorFactsTarget } = require('./ai/memberFacts');
 const {
   stripOutputControlChars,
   stripZeroWidth,
@@ -77,10 +90,6 @@ const {
   ATTACHMENT_IMAGE_OCR_MAX_CHARS,
   ATTACHMENT_IMAGE_ANALYSIS_TIMEOUT_MS,
   ATTACHMENT_MAX_COUNT,
-  WEB_SEARCH_MAX_RESULTS,
-  WEB_SEARCH_MAX_PAGES,
-  WEB_SEARCH_MAX_PAGE_CHARS,
-  WEB_URL_MAX_FETCHES,
   AI_RATE_LIMIT_PER_MINUTE,
   AI_RATE_LIMIT_PING_ONLY_PER_MINUTE,
   AI_REPLY_CHAIN_MAX_DEPTH,
@@ -97,6 +106,12 @@ const {
   AI_FALLBACK_REPLY_TEXT,
   AI_FORCE_VISIBLE_REPLY,
 } = require('./services/runtimeConfig');
+const {
+  extractWebSearchQuery,
+  extractUrls,
+  fetchWebPageText,
+  performWebSearch,
+} = require('./utils/webSearch');
 
 const EXEMPT_USER_ID = '777427217490903080';
 const CREATOR_USER_ID = '777427217490903080';
@@ -144,10 +159,6 @@ const MAX_IMAGE_ATTACHMENT_BYTES = ATTACHMENT_IMAGE_MAX_BYTES;
 const MAX_IMAGE_OCR_CHARS = ATTACHMENT_IMAGE_OCR_MAX_CHARS;
 const IMAGE_ANALYSIS_TIMEOUT_MS = ATTACHMENT_IMAGE_ANALYSIS_TIMEOUT_MS;
 const MAX_ATTACHMENTS_PER_MESSAGE = ATTACHMENT_MAX_COUNT;
-const MAX_WEB_RESULTS = WEB_SEARCH_MAX_RESULTS;
-const MAX_WEB_PAGES = WEB_SEARCH_MAX_PAGES;
-const MAX_WEB_PAGE_CHARS = WEB_SEARCH_MAX_PAGE_CHARS;
-const MAX_URL_FETCHES = WEB_URL_MAX_FETCHES;
 const MAX_REPLY_CHAIN_DEPTH = AI_REPLY_CHAIN_MAX_DEPTH;
 const MAX_RANDOM_CONTEXT_SCAN = AI_RANDOM_CONTEXT_SCAN;
 const MIN_RANDOM_CONTEXT_KEEP = AI_RANDOM_CONTEXT_MIN_KEEP;
@@ -511,115 +522,6 @@ function chunkLines(lines, maxLen = 1800) {
 
   if (current) chunks.push(current);
   return chunks;
-}
-
-function decodeHtmlEntities(text) {
-  return String(text || '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-}
-
-function stripHtmlTags(html) {
-  if (!html) return '';
-  let out = String(html);
-  out = out.replace(/<script[\s\S]*?<\/script>/gi, ' ');
-  out = out.replace(/<style[\s\S]*?<\/style>/gi, ' ');
-  out = out.replace(/<\/(p|div|br|li|h[1-6])>/gi, '\n');
-  out = out.replace(/<[^>]+>/g, ' ');
-  out = out.replace(/\s+/g, ' ').trim();
-  return decodeHtmlEntities(out);
-}
-
-function extractWebSearchQuery(text) {
-  const t = String(text || '');
-  const match = t.match(/\b(?:search|web|lookup)\s*:\s*(.+)$/i);
-  if (!match) return '';
-  return match[1].trim();
-}
-
-function extractUrls(text) {
-  const t = String(text || '');
-  const urls = [];
-  const re = /\bhttps?:\/\/[^\s<>()]+/gi;
-  let match;
-  while ((match = re.exec(t)) && urls.length < MAX_URL_FETCHES) {
-    const raw = match[0].replace(/[)\].,!?]+$/g, '');
-    if (!urls.includes(raw)) urls.push(raw);
-  }
-  return urls;
-}
-
-function resolveDuckDuckGoUrl(href) {
-  if (!href) return '';
-  try {
-    const url = new URL(href, 'https://duckduckgo.com');
-    if (url.hostname.includes('duckduckgo.com') && url.pathname === '/l/') {
-      const uddg = url.searchParams.get('uddg');
-      if (uddg) return decodeURIComponent(uddg);
-    }
-    return href;
-  } catch {
-    return href;
-  }
-}
-
-async function fetchWebPageText(url) {
-  if (!url) return '';
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0',
-      Accept: 'text/html,application/xhtml+xml',
-    },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const contentType = String(res.headers.get('content-type') || '').toLowerCase();
-  const isText =
-    contentType.includes('text/html') ||
-    contentType.includes('text/plain') ||
-    contentType.includes('application/json') ||
-    contentType.includes('application/xml') ||
-    contentType.includes('text/xml');
-  if (!isText) return '';
-  const html = await res.text();
-  const text = stripHtmlTags(html);
-  return text.slice(0, MAX_WEB_PAGE_CHARS);
-}
-
-async function performWebSearch(query) {
-  if (!query) return [];
-  const url = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-  if (!res.ok) throw new Error(`Search HTTP ${res.status}`);
-  const html = await res.text();
-
-  const results = [];
-  const linkRe = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-  const snippetRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>|<div[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/div>/i;
-
-  let match;
-  while ((match = linkRe.exec(html)) && results.length < MAX_WEB_RESULTS) {
-    const href = resolveDuckDuckGoUrl(match[1]);
-    const title = decodeHtmlEntities(stripHtmlTags(match[2]));
-    const snippetMatch = html.slice(match.index).match(snippetRe);
-    const snippet = snippetMatch ? decodeHtmlEntities(stripHtmlTags(snippetMatch[1] || snippetMatch[2])) : '';
-    if (href) results.push({ title, url: href, snippet });
-  }
-
-  const pages = [];
-  for (const r of results.slice(0, MAX_WEB_PAGES)) {
-    try {
-      // eslint-disable-next-line no-await-in-loop
-      const content = await fetchWebPageText(r.url);
-      pages.push({ ...r, content });
-    } catch {
-      pages.push({ ...r, content: '' });
-    }
-  }
-
-  return pages;
 }
 
 async function retry(fn, { retries = 2, delayMs = 750 } = {}) {
@@ -1119,7 +1021,7 @@ function pruneMemberFactsCache() {
 }
 
 function isMemberFactsRequestText(text) {
-  return /(\brole\b|\broles\b|\busername\b|\buser\s*name\b|\bdisplay\s*name\b|\bnickname\b|\bperm\b|\bperms\b|\bpermissions\b|\bid\b|\badmin\b|\bmoderator\b|\bmod\b|\bban\b|\bkick\b|\bmute\b|\btimeout\b|\bmanage\b|\bmember\s+facts?\b|\bmember\s+info\b|\buser\s+info\b|\bwho(?:'s| is)\b|\binfo(?:rmation)?\s+(?:on|for|about)\b|\bprofile\b)/i
+  return /(\brole\b|\broles\b|\busername\b|\buser\s*name\b|\bdisplay\s*name\b|\bnickname\b|\bperm\b|\bperms\b|\bpermissions\b|\buser\s*id\b|\bmember\s*id\b|\buserid\b|\badmin\b|\bmoderator\b|\bmod\b|\bban\b|\bkick\b|\bmute\b|\btimeout\b|\bmanage\b|\bmember\s+facts?\b|\bmember\s+info\b|\buser\s+info\b|\bwho(?:'s| is)\b|\binfo(?:rmation)?\s+(?:on|for|about)\b|\bprofile\b)/i
     .test(String(text || ''));
 }
 
@@ -2285,10 +2187,6 @@ function createBot({ loadstringStore } = {}) {
     return HF_PROVIDER_PRESETS[key] || raw;
   }
 
-  function buildStrictSystemPrompt(basePrompt) {
-    return `${basePrompt} STRICT MODE: reply with only the final message. 1-2 sentences max. no reasoning no analysis no meta. if you are unsure, answer with a short casual line.`;
-  }
-
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -2318,7 +2216,6 @@ function createBot({ loadstringStore } = {}) {
   }
 
   // Mention-review state (in-memory)
-  const pendingMentionReviews = new Map();
   const pendingLoadstringCopies = new Map();
   const pendingApiListPanels = new Map();
   const replyTargetTracker = createReplyTargetTracker({
@@ -2956,231 +2853,20 @@ function createBot({ loadstringStore } = {}) {
     });
   }
 
-  function buildMentionReviewEmbedsForPending(pending, guild, statusText, color) {
-    const safeGuild = guild || { id: pending.guildId, name: 'Unknown' };
-    const requestedBy = {
-      id: pending.requestedById,
-      tag: pending.requestedByTag || 'Unknown',
-    };
-    return {
-      guild: buildMentionReviewEmbedForScope({
-        requestedBy,
-        channelId: pending.targetChannelId,
-        content: pending.content,
-        source: pending.source,
-        guild: safeGuild,
-        includeServer: false,
-        statusText,
-        color,
-      }),
-      global: buildMentionReviewEmbedForScope({
-        requestedBy,
-        channelId: pending.targetChannelId,
-        content: pending.content,
-        source: pending.source,
-        guild: safeGuild,
-        includeServer: true,
-        statusText,
-        color,
-      }),
-    };
-  }
-
-  async function updateMentionReviewMessages(reviewMessages, embeds, components = []) {
-    if (!Array.isArray(reviewMessages) || reviewMessages.length === 0) return;
-
-    for (const entry of reviewMessages) {
-      const channel = await client.channels.fetch(entry.channelId).catch(() => null);
-      if (!channel || !channel.isTextBased()) continue;
-
-      const msg = await channel.messages.fetch(entry.messageId).catch(() => null);
-      if (!msg) continue;
-
-      const embed = entry.scope === 'global' ? embeds.global : embeds.guild;
-      if (!embed) continue;
-
-      await msg.edit({ embeds: [embed], components }).catch(() => {});
-    }
-  }
-
-  async function requestMentionReview({
-    guild,
-    requestedBy,
-    targetChannelId,
-    replyToMessageId,
-    content,
-    source,
-    // if true, even approval will NOT allow mentions (used for AI)
-    noMentionsOnApprove = false,
-  }) {
-    const guildCfg = getGuildConfig(config, guild.id);
-    const globalLogChannelId = config?.globalLogChannelId || null;
-    const reviewTargets = [];
-
-    if (guildCfg.logChannelId) {
-      const logChannel = await guild.channels.fetch(guildCfg.logChannelId).catch(() => null);
-      if (logChannel && logChannel.isTextBased()) {
-        reviewTargets.push({ channel: logChannel, scope: 'guild' });
-      }
-    }
-
-    if (globalLogChannelId && globalLogChannelId !== guildCfg.logChannelId) {
-      const globalChannel = await client.channels.fetch(globalLogChannelId).catch(() => null);
-      if (globalChannel && globalChannel.isTextBased()) {
-        reviewTargets.push({ channel: globalChannel, scope: 'global' });
-      }
-    }
-
-    if (reviewTargets.length === 0) {
-      return {
-        ok: false,
-        reason: 'No log channel set. Use /setlogchannel or /setgloballog first.',
-      };
-    }
-
-    const id = crypto.randomBytes(6).toString('hex');
-    const row = buildMentionReviewRow(id);
-    const reviewMessages = [];
-
-    const embeds = {
-      guild: buildMentionReviewEmbedForScope({
-        requestedBy,
-        channelId: targetChannelId,
-        content,
-        source,
-        guild,
-        includeServer: false,
-      }),
-      global: buildMentionReviewEmbedForScope({
-        requestedBy,
-        channelId: targetChannelId,
-        content,
-        source,
-        guild,
-        includeServer: true,
-      }),
-    };
-
-    for (const target of reviewTargets) {
-      const embed = target.scope === 'global' ? embeds.global : embeds.guild;
-      if (!embed) continue;
-
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        const msg = await target.channel.send({ embeds: [embed], components: [row] });
-        reviewMessages.push({
-          channelId: target.channel.id,
-          messageId: msg.id,
-          scope: target.scope,
-        });
-      } catch (e) {
-        console.error('Failed to send mention-review message to log channel:', e);
-      }
-    }
-
-    if (reviewMessages.length === 0) {
-      return {
-        ok: false,
-        reason: 'Cant post to the log channel (missing perms?) set /setlogchannel or /setgloballog again',
-      };
-    }
-
-    const expiresAt = Date.now() + 60_000;
-    pendingMentionReviews.set(id, {
-      id,
-      guildId: guild.id,
-      reviewMessages,
-      targetChannelId,
-      replyToMessageId,
-      requestedById: requestedBy?.id,
-      requestedByTag: requestedBy?.tag,
-      source,
-      content,
-      noMentionsOnApprove,
-      expiresAt,
-    });
-
-    setTimeout(async () => {
-      const p = pendingMentionReviews.get(id);
-      if (!p) return;
-
-      pendingMentionReviews.delete(id);
-
-      const reviewGuild = guild || (await client.guilds.fetch(p.guildId).catch(() => null));
-      const expiredEmbeds = buildMentionReviewEmbedsForPending(p, reviewGuild, 'Auto-rejected (timeout)', 0xed4245);
-      await updateMentionReviewMessages(p.reviewMessages, expiredEmbeds, []);
-    }, 60_000);
-
-    return { ok: true, id };
-  }
-
-  async function sendWithMentionReview({
-    guild,
-    requestedBy,
-    channel,
-    replyToMessageId,
-    content,
-    source,
-    allowedMentions,
-    noMentionsOnApprove,
-    files,
-  }) {
-    const danger = detectDangerousMentions(content);
-
-    // Even if the detector misses something, we still enforce allowedMentions at send time.
-    const safeAllowedMentions = allowedMentions || allowedMentionsSafe();
-
-    if (!danger.dangerous) {
-      // Safe send
-      try {
-        let sentMessage = null;
-        await retry(async () => {
-          if (replyToMessageId) {
-            // Avoid fetching messages (can require Read Message History). Use reply reference instead.
-            sentMessage = await channel.send({
-              content,
-              allowedMentions: safeAllowedMentions,
-              reply: { messageReference: replyToMessageId, failIfNotExists: false },
-              files,
-            });
-          } else {
-            sentMessage = await channel.send({ content, allowedMentions: safeAllowedMentions, files });
-          }
-        });
-        return {
-          sent: true,
-          reviewed: false,
-          messageId: sentMessage?.id || null,
-        };
-      } catch (e) {
-        console.error('Failed to send message:', e);
-        return { sent: false, reviewed: false, error: 'send failed (missing perms?)' };
-      }
-    }
-
-    if (files && files.length > 0) {
-      return { sent: false, reviewed: false, error: 'mentions+files not supported' };
-    }
-
-    let res;
-    try {
-      res = await requestMentionReview({
-        guild,
-        requestedBy,
-        targetChannelId: channel.id,
-        replyToMessageId,
-        content,
-        source,
-        noMentionsOnApprove: !!noMentionsOnApprove,
-      });
-    } catch (e) {
-      console.error('Mention review request failed:', e);
-      return { sent: false, reviewed: true, error: 'mention review failed' };
-    }
-
-    if (!res.ok) return { sent: false, reviewed: true, error: res.reason };
-    return { sent: false, reviewed: true, reviewId: res.id };
-  }
+  const mentionReviewSubsystem = createMentionReviewSubsystem({
+    client,
+    config,
+    getGuildConfig,
+    retry,
+    detectDangerousMentions,
+    allowedMentionsSafe,
+    allowedMentionsAiReplyPing,
+    allowedMentionsApproved,
+    hasModPermission,
+    buildMentionReviewRow,
+    buildMentionReviewEmbedForScope,
+  });
+  const { sendWithMentionReview } = mentionReviewSubsystem;
 
   async function processExpiredTempBans() {
     const now = Date.now();
@@ -3220,174 +2906,7 @@ function createBot({ loadstringStore } = {}) {
     }
   }
 
-  // Slash command builders
-  const pingCommand = new SlashCommandBuilder().setName('ping').setDescription('Shows the bot latency.');
-  const helpCommand = new SlashCommandBuilder().setName('help').setDescription('DMs you the bot command list.');
-  const loadstringCommand = new SlashCommandBuilder()
-    .setName('loadstring')
-    .setDescription('Create/update a hosted loadstring link.')
-    .addStringOption((opt) =>
-      opt.setName('name').setDescription('Loadstring name/slug').setRequired(true)
-    )
-    .addAttachmentOption((opt) =>
-      opt.setName('file').setDescription('Script file attachment (preferred over inline)').setRequired(false)
-    )
-    .addStringOption((opt) =>
-      opt.setName('inline').setDescription('Inline script text fallback').setRequired(false)
-    );
-  const lsListCommand = new SlashCommandBuilder()
-    .setName('lslist')
-    .setDescription('List your hosted loadstring links.');
-  const lsRemoveCommand = new SlashCommandBuilder()
-    .setName('lsremove')
-    .setDescription('Remove one hosted loadstring.')
-    .addStringOption((opt) =>
-      opt.setName('name').setDescription('Loadstring name/slug to remove').setRequired(true)
-    );
-  const lsInfoCommand = new SlashCommandBuilder()
-    .setName('lsinfo')
-    .setDescription('DM detailed info for one loadstring.')
-    .addStringOption((opt) =>
-      opt.setName('name').setDescription('Loadstring name/slug to inspect').setRequired(true)
-    );
-  const setBanChannelCommand = new SlashCommandBuilder()
-    .setName('setbanchannel')
-    .setDescription('Set this channel as ban channel (msg => delete 24h + ban; exempt user ignored).')
-    .setDMPermission(false);
-  const setPrefixCommand = new SlashCommandBuilder()
-    .setName('setprefix')
-    .setDMPermission(false)
-    .setDescription('Changes the bot prefix for this server.')
-    .addStringOption((opt) => opt.setName('prefix').setDescription('New prefix, e.g. s.').setRequired(true));
-  const setLogChannelCommand = new SlashCommandBuilder()
-    .setName('setlogchannel')
-    .setDescription('Set log channel for mod actions (mods only).')
-    .setDMPermission(false);
-  const attachmentsCommand = new SlashCommandBuilder()
-    .setName('attachments')
-    .setDMPermission(false)
-    .setDescription('Toggle global attachment reading for the bot (mods only).')
-    .addStringOption((opt) =>
-      opt
-        .setName('mode')
-        .setDescription('on/off/toggle/status')
-        .setRequired(false)
-        .addChoices(
-          { name: 'On', value: 'on' },
-          { name: 'Off', value: 'off' },
-          { name: 'Toggle', value: 'toggle' },
-          { name: 'Status', value: 'status' }
-        )
-    );
-  const sayCommand = new SlashCommandBuilder()
-    .setName('say')
-    .setDMPermission(false)
-    .setDescription('Make the bot send a message (mods only).')
-    .addStringOption((opt) => opt.setName('text').setDescription('Text to send').setRequired(true))
-    .addStringOption((opt) =>
-      opt.setName('reply_to').setDescription('Message ID to reply to (optional)').setRequired(false)
-    );
-
-  const blacklistCommand = new SlashCommandBuilder()
-    .setName('blacklist')
-    .setDMPermission(false)
-    .setDescription('Blacklist users from using the AI chatbot (creator/whitelist only).')
-    .addStringOption((opt) =>
-      opt
-        .setName('action')
-        .setDescription('add/remove/list')
-        .setRequired(true)
-        .addChoices(
-          { name: 'Add', value: 'add' },
-          { name: 'Remove', value: 'remove' },
-          { name: 'List', value: 'list' }
-        )
-    )
-    .addUserOption((opt) => opt.setName('user').setDescription('Target user (for add/remove)').setRequired(false))
-    .addStringOption((opt) => opt.setName('userid').setDescription('Target user ID (for add/remove)').setRequired(false));
-  const creatorWhitelistCommand = new SlashCommandBuilder()
-    .setName('creatorwhitelist')
-    .setDMPermission(false)
-    .setDescription('Manage creator whitelist for elevated features (creator/whitelist).')
-    .addStringOption((opt) =>
-      opt
-        .setName('action')
-        .setDescription('add/remove/list')
-        .setRequired(true)
-        .addChoices(
-          { name: 'Add', value: 'add' },
-          { name: 'Remove', value: 'remove' },
-          { name: 'List', value: 'list' }
-        )
-    )
-    .addUserOption((opt) => opt.setName('user').setDescription('Target user (for add/remove)').setRequired(false))
-    .addStringOption((opt) => opt.setName('userid').setDescription('Target user ID (for add/remove)').setRequired(false));
-
-  const muteCommand = new SlashCommandBuilder()
-    .setName('mute')
-    .setDMPermission(false)
-    .setDescription('Timeout a member (mods only).')
-    .addStringOption((opt) => opt.setName('duration').setDescription('e.g. 30m, 1d').setRequired(true))
-    .addUserOption((opt) => opt.setName('user').setDescription('User to mute').setRequired(false))
-    .addStringOption((opt) => opt.setName('userid').setDescription('User ID (optional)').setRequired(false))
-    .addStringOption((opt) => opt.setName('reason').setDescription('Reason (optional)').setRequired(false));
-
-  const kickCommand = new SlashCommandBuilder()
-    .setName('kick')
-    .setDMPermission(false)
-    .setDescription('Kick a member (mods only).')
-    .addUserOption((opt) => opt.setName('user').setDescription('User to kick').setRequired(false))
-    .addStringOption((opt) => opt.setName('userid').setDescription('User ID (optional)').setRequired(false))
-    .addStringOption((opt) => opt.setName('reason').setDescription('Reason (optional)').setRequired(false));
-
-  // NOTE: user requested everything optional on ban/tempban
-  const banCommand = new SlashCommandBuilder()
-    .setName('ban')
-    .setDMPermission(false)
-    .setDescription('Ban a member + delete msgs (mods only).')
-    .addUserOption((opt) => opt.setName('user').setDescription('User to ban').setRequired(false))
-    .addStringOption((opt) => opt.setName('userid').setDescription('User ID (optional)').setRequired(false))
-    .addStringOption((opt) => opt.setName('delete').setDescription('Delete time: 30m, 24h, 7d (optional)').setRequired(false))
-    .addStringOption((opt) => opt.setName('reason').setDescription('Reason (optional)').setRequired(false));
-
-  const tempbanCommand = new SlashCommandBuilder()
-    .setName('tempban')
-    .setDMPermission(false)
-    .setDescription('Tempban a member (mods only).')
-    .addUserOption((opt) => opt.setName('user').setDescription('User to tempban').setRequired(false))
-    .addStringOption((opt) => opt.setName('userid').setDescription('User ID (optional)').setRequired(false))
-    .addStringOption((opt) => opt.setName('duration').setDescription('e.g. 30m, 24h, 7d (optional)').setRequired(false))
-    .addStringOption((opt) => opt.setName('reason').setDescription('Reason (optional)').setRequired(false));
-
-  async function registerSlashCommands() {
-    const rest = new REST({ version: '10' }).setToken(TOKEN);
-
-    if (!client.application?.id) {
-      throw new Error('client.application.id is missing; cannot register slash commands.');
-    }
-
-    await rest.put(Routes.applicationCommands(client.application.id), {
-      body: [
-        pingCommand.toJSON(),
-        helpCommand.toJSON(),
-        loadstringCommand.toJSON(),
-        lsListCommand.toJSON(),
-        lsRemoveCommand.toJSON(),
-        lsInfoCommand.toJSON(),
-        setBanChannelCommand.toJSON(),
-        setPrefixCommand.toJSON(),
-        setLogChannelCommand.toJSON(),
-        attachmentsCommand.toJSON(),
-        sayCommand.toJSON(),
-        blacklistCommand.toJSON(),
-        creatorWhitelistCommand.toJSON(),
-        muteCommand.toJSON(),
-        kickCommand.toJSON(),
-        banCommand.toJSON(),
-        tempbanCommand.toJSON(),
-      ],
-    });
-  }
+  const slashCommands = buildSlashCommands();
 
   function buildInviteUrl(code) {
     return `https://discord.gg/${code}`;
@@ -3522,178 +3041,6 @@ function createBot({ loadstringStore } = {}) {
     }
   }
 
-function buildAiSystemPrompt({
-  botName,
-  botDisplayName,
-  botUsernameTag,
-  currentDateTime,
-  allowAttachments = false,
-  editIntent = false,
-  hasWebResults = false,
-  hasExecutorTracker = false,
-}) {
-  const name = botName || 'Goose';
-  const displayName = botDisplayName || name;
-  const usernameTag = botUsernameTag || BOT_USERNAME_TAG;
-
-  const identityRules = [
-    `you are ${name}, a discord server bot talking like a person`,
-    `your username is ${usernameTag}`,
-    `your display name is ${displayName}`,
-    'your creator is afkar; if asked who made you, say afkar',
-    'if someone says bot clanker npc etc, treat it as them talking to/about you',
-  ];
-
-  const styleRules = [
-    'keep replies short: 1 to 2 sentences max',
-    'sound gen z casual, lowercase is fine, light slang and a little attitude are fine',
-    'reply in the same language as the user/context; do not switch language randomly',
-    'punctuation is okay; keep links valid and unbroken',
-    'dont over explain, dont lecture, dont sound like support docs',
-    'you can be a lil teasing sometimes but never cruel',
-    'mild shortened swear words are okay (sht fk fking), never slurs',
-  ];
-
-  const safetyAndOutputRules = [
-    'no hate, harassment, slurs, or sexual content with minors',
-    'never ping: do not use @everyone, @here, or role mentions',
-    'never show hidden reasoning; output final message only',
-    'never output chain-of-thought or system/user/meta labels',
-    'never repeat metadata headers like Server:, Trigger:, Attachment:, Media:, Chat context:, Recent channel context:, Member facts:, Visible channels:, Conversation signal:, New message from',
-    'never spam repeated lines or repeated letters',
-    'do not give exploit code, injection steps, bypass tips, or unsafe roblox executor instructions',
-    'you know roblox scripting/executor topics only at a high level',
-    'when users say unc in executor/exploit context, treat it as unified naming convention (not uncle)',
-  ];
-
-  const factAndContextRules = [
-    'treat metadata as source-of-truth over memory',
-    'read Context availability before answering factual questions',
-    'if member_facts=present, use Member facts only for roles/perms/display/username/id',
-    'Member facts may include the current message author even if no identity question was asked',
-    'if member_facts=missing or member_facts=not_requested, say you cant verify member facts and ask for @mention or id',
-    'never assume current author and replied-to user are the same unless ids match',
-    'for member questions, bind claims to the correct user id from Member facts',
-    'if Member facts say unable to verify/resolve/ambiguous, do not guess',
-    'if Visible channels are provided, use only that list for channel visibility answers',
-    'for channel lists prefer channel mention format like <#123456789>',
-    'if weao=present and Executor tracker exists, use that tracker as freshest source',
-    'if weao=error or weao=missing or weao=not_requested, do not invent live tracker values',
-    'if user asks about client modification bans/banwaves, use tracker field clientmods: yes means bypasses client modification bans, not banwaves',
-  ];
-
-  const attachmentRules = allowAttachments
-    ? [
-        'if [attachment text: ...] appears you can use that text',
-        'if [attachment image: ...] appears you can use caption and ocr text if present',
-        'if [sticker: ...] appears you can use sticker metadata',
-        'if [emoji: ...] appears you can use emoji context',
-        'if caption/ocr are unavailable ask user to describe the image',
-      ]
-    : ['if Attachment: yes, say you cant check attachments and ask user to describe it'];
-
-  const runtimeRules = [];
-  if (currentDateTime?.localText && currentDateTime?.isoUtc) {
-    runtimeRules.push(
-      `current datetime in ${currentDateTime.timeZone} is ${currentDateTime.localText}`,
-      `current utc datetime is ${currentDateTime.isoUtc}`,
-      'if user asks for current date/time, use this runtime context exactly'
-    );
-  }
-
-  const modeRules = [];
-  if (editIntent) {
-    modeRules.push(
-      'the user wants you to edit the attached file',
-      'reply with ONLY the full updated file in one code block and no extra text'
-    );
-  } else if (allowAttachments) {
-    modeRules.push('if user asks for explanation, avoid code blocks unless they ask for code');
-  }
-  if (hasWebResults) {
-    modeRules.push('if Web pages/search results are provided, you may use them to answer');
-  }
-  if (hasExecutorTracker) {
-    modeRules.push('Executor tracker block is provided and should be treated as authoritative for live executor status');
-  }
-
-  return [
-    'Identity Rules:',
-    ...identityRules.map((line) => `- ${line}`),
-    '',
-    'Style Rules:',
-    ...styleRules.map((line) => `- ${line}`),
-    '',
-    'Safety And Output Rules:',
-    ...safetyAndOutputRules.map((line) => `- ${line}`),
-    '',
-    'Fact And Context Rules:',
-    ...factAndContextRules.map((line) => `- ${line}`),
-    '',
-    'Attachment Rules:',
-    ...attachmentRules.map((line) => `- ${line}`),
-    ...(runtimeRules.length > 0
-      ? ['', 'Runtime Rules:', ...runtimeRules.map((line) => `- ${line}`)]
-      : []),
-    ...(modeRules.length > 0
-      ? ['', 'Mode Rules:', ...modeRules.map((line) => `- ${line}`)]
-      : []),
-  ].join('\n');
-}
-
-function buildRawAiSystemPrompt({
-  currentDateTime,
-  allowAttachments = false,
-  editIntent = false,
-  hasWebResults = false,
-  hasExecutorTracker = false,
-}) {
-  const base = [
-    'you are a direct assistant in discord',
-    'no roleplay no personality',
-    'reply directly to the user request',
-    'keep it concise unless asked for detail',
-    'for factual claims, prefer provided metadata/context over memory',
-    'if context says member_facts missing/not_requested, do not guess member roles/perms/display names',
-    'if context says weao missing/error/not_requested, do not invent live executor tracker values',
-  ];
-
-  if (currentDateTime?.localText && currentDateTime?.isoUtc) {
-    base.push(
-      `current datetime in ${currentDateTime.timeZone} is ${currentDateTime.localText}`,
-      `current utc datetime is ${currentDateTime.isoUtc}`,
-      'if user asks date or time use this runtime context'
-    );
-  }
-
-  if (allowAttachments) {
-    base.push(
-      'if [attachment text: ...] appears you can use that text',
-      'if [attachment image: ...] appears you can use caption and ocr text',
-      'if [sticker: ...] appears you can use sticker metadata',
-      'if [emoji: ...] appears you can use emoji context'
-    );
-  } else {
-    base.push('if Attachment: yes and content is missing ask user to describe it');
-  }
-
-  if (editIntent) {
-    base.push(
-      'the user wants a file edit',
-      'reply with only the full updated file in a single code block'
-    );
-  }
-
-  if (hasWebResults) {
-    base.push('if web pages or search results are provided use them as primary context');
-  }
-  if (hasExecutorTracker) {
-    base.push('if executor tracker block is present use it as authoritative');
-  }
-
-  return base.join(' ');
-}
-
 function applyHfProvider(providerKey) {
   const key = String(providerKey || '').trim().toLowerCase();
   const model = HF_PROVIDER_PRESETS[key];
@@ -3701,17 +3048,6 @@ function applyHfProvider(providerKey) {
   config.hfChatModel = key;
   saveConfig(config);
   return { key, model };
-}
-
-function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, hasAttachments }) {
-  const t = String(messageText || '').toLowerCase();
-  if (editIntent) return 0.35;
-  if (/(bug|error|stack|fix|debug|refactor|optimi[sz]e|patch|rewrite)/.test(t)) return 0.5;
-  if (/(explain|help|how|why|what|guide|doc)/.test(t)) return 0.6;
-  if (/(story|poem|joke|roast|rap|creative|meme)/.test(t)) return 0.95;
-  if (isRandomTrigger) return 1.0;
-  if (hasAttachments) return 0.55;
-  return 0.75;
 }
 
   async function handleAiChat(message, context = {}) {
@@ -4126,7 +3462,11 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       ? await extractAskedMemberTargets(message, context)
       : [];
     const authorFactsTarget =
-      MEMBER_FACTS_ALWAYS_INCLUDE_AUTHOR && message.guild
+      shouldIncludeAuthorFactsTarget({
+        enabled: MEMBER_FACTS_ALWAYS_INCLUDE_AUTHOR,
+        wantsMemberFacts,
+        askedMemberTargets,
+      }) && message.guild
         ? buildAuthorMemberFactsTarget(message)
         : null;
     if (authorFactsTarget) {
@@ -4419,9 +3759,12 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       aiText = sanitized.text;
 
       if (!aiText) {
+        const sanitizedReasons = sanitized.analysis?.reasons?.length
+          ? [...sanitized.analysis.reasons]
+          : ['unknown'];
         let retryErr = null;
         try {
-          const strictSystem = buildStrictSystemPrompt(systemText);
+          const strictSystem = buildStrictSystemPrompt(systemText, sanitizedReasons);
           const retryText = await callAiOnce({
             system: strictSystem,
             temperature: Math.min(temperature, 0.6),
@@ -4691,7 +4034,11 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     }, 60_000);
 
     try {
-      await registerSlashCommands();
+      await registerSlashCommands({
+        token: TOKEN,
+        client,
+        commands: slashCommands,
+      });
       console.log('Slash commands registered.');
     } catch (err) {
       console.error('Failed to register slash commands:', err);
@@ -4828,24 +4175,23 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
     const [rawCmd, ...args] = message.content.slice(prefix.length).trim().split(/\s+/);
     const cmd = (rawCmd || '').toLowerCase();
 
-    if (cmd === 'loadstring' || cmd === 'ls') {
-      await handleCreateLoadstringCommand(message, prefix);
-      return;
-    }
-
-    if (cmd === 'lslist') {
-      await handleListLoadstringsCommand(message);
-      return;
-    }
-
-    if (cmd === 'lsremove') {
-      await handleRemoveLoadstringCommand(message, args[0], prefix);
-      return;
-    }
-
-    if (cmd === 'lsinfo') {
-      await handleLoadstringInfoCommand(message, args[0], prefix);
-      return;
+    if (isLoadstringPrefixCommand(cmd)) {
+      if (cmd === 'loadstring' || cmd === 'ls') {
+        await handleCreateLoadstringCommand(message, prefix);
+        return;
+      }
+      if (cmd === 'lslist') {
+        await handleListLoadstringsCommand(message);
+        return;
+      }
+      if (cmd === 'lsremove') {
+        await handleRemoveLoadstringCommand(message, args[0], prefix);
+        return;
+      }
+      if (cmd === 'lsinfo') {
+        await handleLoadstringInfoCommand(message, args[0], prefix);
+        return;
+      }
     }
 
     if (cmd === 'blacklist' || cmd === 'aibl' || cmd === 'aiblacklist') {
@@ -5752,82 +5098,8 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
         return;
       }
 
-      const parts = String(interaction.customId || '').split(':');
-      if (parts.length === 3 && parts[0] === 'mentionReview') {
-        const action = parts[1];
-        const id = parts[2];
-
-        const pending = pendingMentionReviews.get(id);
-        if (!pending) {
-          await interaction.reply({ content: 'This review is no longer active.', ephemeral: true }).catch(() => {});
-          return;
-        }
-
-        if (!hasModPermission(interaction.memberPermissions || interaction.member)) {
-          await interaction.reply({ content: 'You are not allowed to approve/reject.', ephemeral: true }).catch(() => {});
-          return;
-        }
-
-        pendingMentionReviews.delete(id);
-
-        const guild = await client.guilds.fetch(pending.guildId).catch(() => null);
-        if (!guild) {
-          await interaction.reply({ content: 'Guild not found.', ephemeral: true }).catch(() => {});
-          return;
-        }
-
-        if (action === 'reject') {
-          const embeds = buildMentionReviewEmbedsForPending(pending, guild, 'Rejected', 0xed4245);
-          await updateMentionReviewMessages(pending.reviewMessages, embeds, []);
-
-          await interaction.reply({ content: 'Rejected.', ephemeral: true }).catch(() => {});
-          return;
-        }
-
-        // approve
-        try {
-          const targetChannel = await guild.channels.fetch(pending.targetChannelId).catch(() => null);
-          if (!targetChannel || !targetChannel.isTextBased()) throw new Error('Target channel invalid');
-
-          const danger = detectDangerousMentions(pending.content);
-          const allowEveryone = danger.hasEveryone || danger.hasHere;
-
-          const approvedAllowedMentions = pending.noMentionsOnApprove
-            ? allowedMentionsAiReplyPing()
-            : allowedMentionsApproved({
-                roleIds: danger.roleIds,
-                allowEveryone,
-              });
-
-          if (pending.replyToMessageId) {
-            // Avoid fetching messages (can require Read Message History). Use reply reference instead.
-            await targetChannel.send({
-              content: pending.content,
-              allowedMentions: approvedAllowedMentions,
-              reply: { messageReference: pending.replyToMessageId, failIfNotExists: false },
-            });
-          } else {
-            await targetChannel.send({
-              content: pending.content,
-              allowedMentions: approvedAllowedMentions,
-            });
-          }
-
-          const embeds = buildMentionReviewEmbedsForPending(
-            pending,
-            guild,
-            `Approved by ${interaction.user.tag}`,
-            0x57f287
-          );
-          await updateMentionReviewMessages(pending.reviewMessages, embeds, []);
-
-          await interaction.reply({ content: 'Approved and sent.', ephemeral: true }).catch(() => {});
-        } catch (e) {
-          console.error('Approve send failed:', e);
-          await interaction.reply({ content: 'Failed to send after approval.', ephemeral: true }).catch(() => {});
-        }
-        return;
-      }
+      const mentionReviewHandled = await mentionReviewSubsystem.handleButtonInteraction(interaction);
+      if (mentionReviewHandled) return;
 
       return;
     }
@@ -5843,17 +5115,9 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       ? (interaction.guild || (await client.guilds.fetch(interaction.guildId).catch(() => null)))
       : null;
     const guildOnlyCommands = new Set([
-      'setbanchannel',
-      'setprefix',
-      'setlogchannel',
-      'attachments',
-      'say',
+      ...MODERATION_SLASH_COMMANDS,
       'blacklist',
       'creatorwhitelist',
-      'mute',
-      'kick',
-      'ban',
-      'tempban',
     ]);
 
     if (!isGuildInteraction && guildOnlyCommands.has(interaction.commandName)) {
@@ -5889,24 +5153,23 @@ function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, h
       return;
     }
 
-    if (interaction.commandName === 'loadstring') {
-      await handleSlashCreateLoadstringCommand(interaction);
-      return;
-    }
-
-    if (interaction.commandName === 'lslist') {
-      await handleSlashListLoadstringsCommand(interaction);
-      return;
-    }
-
-    if (interaction.commandName === 'lsremove') {
-      await handleSlashRemoveLoadstringCommand(interaction);
-      return;
-    }
-
-    if (interaction.commandName === 'lsinfo') {
-      await handleSlashLoadstringInfoCommand(interaction);
-      return;
+    if (isLoadstringSlashCommand(interaction.commandName)) {
+      if (interaction.commandName === 'loadstring') {
+        await handleSlashCreateLoadstringCommand(interaction);
+        return;
+      }
+      if (interaction.commandName === 'lslist') {
+        await handleSlashListLoadstringsCommand(interaction);
+        return;
+      }
+      if (interaction.commandName === 'lsremove') {
+        await handleSlashRemoveLoadstringCommand(interaction);
+        return;
+      }
+      if (interaction.commandName === 'lsinfo') {
+        await handleSlashLoadstringInfoCommand(interaction);
+        return;
+      }
     }
 
     if (interaction.commandName === 'setbanchannel') {
