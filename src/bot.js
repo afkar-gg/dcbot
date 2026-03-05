@@ -46,7 +46,7 @@ const {
   buildExecutorTrackerSummary,
 } = require('./services/weaoService');
 const { createReplyTargetTracker } = require('./ai/replyTargetTracker');
-const { detectAiTrigger } = require('./ai/triggerDetector');
+const { detectAiTrigger, isDmChatTrigger } = require('./ai/triggerDetector');
 const { sendAiReplyGuaranteed } = require('./ai/replySender');
 const { createChatOrchestrator } = require('./ai/chatOrchestrator');
 const { buildSlashCommands, registerSlashCommands } = require('./discord/slashRegistry');
@@ -3444,11 +3444,12 @@ function applyGroqProvider(modelId) {
     // If both exist, we prefer the managed list.
     const groqKeys = Array.isArray(config.groqApiKeys) ? config.groqApiKeys.filter(Boolean) : [];
     if (!GROQ_API_KEY && groqKeys.length === 0) return;
-    if (!message.guild || !message.channel?.isTextBased?.()) return;
+    if (!message.channel?.isTextBased?.()) return;
+    const isGuildContext = !!message.guild;
 
     // Avoid responding to commands
-    const guildCfg = getGuildConfig(config, message.guild.id);
-    const prefix = guildCfg.prefix || DEFAULT_PREFIX;
+    const guildCfg = isGuildContext ? getGuildConfig(config, message.guild.id) : null;
+    const prefix = isGuildContext ? (guildCfg.prefix || DEFAULT_PREFIX) : DEFAULT_PREFIX;
     if (message.content?.startsWith(prefix)) return;
 
     // Blacklist check (defense-in-depth).
@@ -3682,20 +3683,50 @@ function applyGroqProvider(modelId) {
       : null;
     let aiReplyMentionUserIds = [];
 
+    async function sendAiPrimary({
+      content,
+      source = 'ai',
+      mentionUserIds = [],
+      files,
+    } = {}) {
+      if (!isGuildContext) {
+        const payload = {
+          content,
+          allowedMentions: allowedMentionsSafe(),
+        };
+        if (Array.isArray(files) && files.length > 0) payload.files = files;
+
+        const sent = await safeReplyTracked(message, payload, source);
+        return {
+          sent: !!sent,
+          reviewed: false,
+          messageId: sent?.id || null,
+          error: sent ? null : 'send failed (dm)',
+        };
+      }
+
+      return sendWithMentionReview({
+        guild: message.guild,
+        requestedBy: message.author,
+        channel: message.channel,
+        replyToMessageId: message.id,
+        content,
+        source,
+        allowedMentions: allowedMentionsAiReplyPing(mentionUserIds),
+        noMentionsOnApprove: true,
+        mentionUserIds,
+        files,
+      });
+    }
+
     async function sendAiNotice(content, source = 'ai-notice') {
       const sendOutcome = await sendAiReplyGuaranteed({
         content,
         fallbackText: FALLBACK_AI_REPLY_TEXT,
         forceVisibleReply: AI_FORCE_VISIBLE_REPLY,
-        sendPrimary: (text) => sendWithMentionReview({
-          guild: message.guild,
-          requestedBy: message.author,
-          channel: message.channel,
-          replyToMessageId: message.id,
+        sendPrimary: (text) => sendAiPrimary({
           content: text,
           source: 'ai',
-          allowedMentions: allowedMentionsAiReplyPing(aiReplyMentionUserIds),
-          noMentionsOnApprove: true,
           mentionUserIds: aiReplyMentionUserIds,
         }),
         sendFallback: (text) => safeReplyTracked(message, {
@@ -3705,7 +3736,7 @@ function applyGroqProvider(modelId) {
       });
 
       const primary = sendOutcome.primary || null;
-      if (primary?.sent && primary?.messageId) {
+      if (isGuildContext && primary?.sent && primary?.messageId) {
         trackBotMessage({ id: primary.messageId }, source);
       }
       return sendOutcome;
@@ -3830,8 +3861,7 @@ function applyGroqProvider(modelId) {
       : '';
 
     const guildName = stripControlChars(message.guild?.name || 'unknown');
-
-    const serverMetaLine = `Server: ${guildName}`;
+    const serverMetaLine = isGuildContext ? `Server: ${guildName}` : 'Server: direct_message';
     const dateTimeMetaLine =
       `Current datetime (${currentDateTime.timeZone}): ${currentDateTime.localText}` +
       ` | UTC: ${currentDateTime.isoUtc}` +
@@ -4210,35 +4240,32 @@ function applyGroqProvider(modelId) {
       const buffer = Buffer.from(rawCode, 'utf8');
       const fileMsg = `edited ${fileName}`;
 
-      const sendRes = await sendWithMentionReview({
-        guild: message.guild,
-        requestedBy: message.author,
-        channel: message.channel,
-        replyToMessageId: message.id,
+      const sendRes = await sendAiPrimary({
         content: fileMsg,
-        source: 'ai',
-        allowedMentions: allowedMentionsAiReplyPing(),
-        noMentionsOnApprove: true,
+        source: 'ai-edit',
+        mentionUserIds: [],
         files: [{ attachment: buffer, name: fileName }],
       });
 
       if (sendRes.sent) {
-        if (sendRes.messageId) {
+        if (isGuildContext && sendRes.messageId) {
           trackBotMessage({ id: sendRes.messageId }, 'ai-edit');
         }
-        const embed = buildModLogEmbed({
-          title: 'AI edited attachment',
-          moderator: message.author,
-          target: null,
-          reason: 'AI attachment edit',
-          extraFields: [
-            { name: 'Channel', value: `${message.channel} (\`${message.channel.id}\`)`, inline: false },
-            { name: 'User message', value: toEmbedFieldValue(message.content, { maxLength: 1024 }), inline: false },
-            { name: 'Edited file', value: fileName, inline: true },
-          ],
-          color: 0x57f287,
-        });
-        await sendLogEmbed({ guild: message.guild, config, getGuildConfig, client }, embed);
+        if (isGuildContext) {
+          const embed = buildModLogEmbed({
+            title: 'AI edited attachment',
+            moderator: message.author,
+            target: null,
+            reason: 'AI attachment edit',
+            extraFields: [
+              { name: 'Channel', value: `${message.channel} (\`${message.channel.id}\`)`, inline: false },
+              { name: 'User message', value: toEmbedFieldValue(message.content, { maxLength: 1024 }), inline: false },
+              { name: 'Edited file', value: fileName, inline: true },
+            ],
+            color: 0x57f287,
+          });
+          await sendLogEmbed({ guild: message.guild, config, getGuildConfig, client }, embed);
+        }
         return;
       }
 
@@ -4285,27 +4312,29 @@ function applyGroqProvider(modelId) {
             rawPreview: rawPreview.slice(0, 260),
           });
 
-          const embed = buildModLogEmbed({
-            title: 'AI output blocked',
-            moderator: message.author,
-            target: null,
-            reason: `Sanitized (${reasonList})${retryErr ? ' after retry' : ''}`,
-            extraFields: [
-              { name: 'Channel', value: `${message.channel} (\`${message.channel.id}\`)`, inline: false },
-              {
-                name: 'User message',
-                value: toEmbedFieldValue(message.content, { maxLength: 1024 }),
-                inline: false,
-              },
-              {
-                name: 'Model output (raw)',
-                value: toEmbedFieldValue(rawPreview, { maxLength: 1024 }),
-                inline: false,
-              },
-            ],
-            color: 0xed4245,
-          });
-          await sendLogEmbed({ guild: message.guild, config, getGuildConfig, client }, embed);
+          if (isGuildContext) {
+            const embed = buildModLogEmbed({
+              title: 'AI output blocked',
+              moderator: message.author,
+              target: null,
+              reason: `Sanitized (${reasonList})${retryErr ? ' after retry' : ''}`,
+              extraFields: [
+                { name: 'Channel', value: `${message.channel} (\`${message.channel.id}\`)`, inline: false },
+                {
+                  name: 'User message',
+                  value: toEmbedFieldValue(message.content, { maxLength: 1024 }),
+                  inline: false,
+                },
+                {
+                  name: 'Model output (raw)',
+                  value: toEmbedFieldValue(rawPreview, { maxLength: 1024 }),
+                  inline: false,
+                },
+              ],
+              color: 0xed4245,
+            });
+            await sendLogEmbed({ guild: message.guild, config, getGuildConfig, client }, embed);
+          }
 
           const sanitizedFallbackText = buildSanitizedFallbackText({
             reasons: sanitized.analysis?.reasons || [],
@@ -4412,15 +4441,10 @@ function applyGroqProvider(modelId) {
         content: part,
         fallbackText: FALLBACK_AI_REPLY_TEXT,
         forceVisibleReply: AI_FORCE_VISIBLE_REPLY,
-        sendPrimary: (text) => sendWithMentionReview({
-          guild: message.guild,
-          requestedBy: message.author,
-          channel: message.channel,
-          replyToMessageId: message.id,
+        sendPrimary: (text) => sendAiPrimary({
           content: text,
           source: 'ai',
-          allowedMentions: allowedMentionsAiReplyPing(),
-          noMentionsOnApprove: true,
+          mentionUserIds: aiReplyMentionUserIds,
         }),
         sendFallback: (text) => safeReplyTracked(message, {
           content: text,
@@ -4429,7 +4453,7 @@ function applyGroqProvider(modelId) {
       });
 
       lastSendRes = sendOutcome.primary || { sent: false, reviewed: false };
-      if (lastSendRes.sent && lastSendRes.messageId) {
+      if (isGuildContext && lastSendRes.sent && lastSendRes.messageId) {
         trackBotMessage({ id: lastSendRes.messageId }, 'ai-primary');
       }
 
@@ -4450,20 +4474,22 @@ function applyGroqProvider(modelId) {
       if (sendOutcome.mode === 'fallback') break;
     }
 
-    const embed = buildModLogEmbed({
-      title: 'AI reply generated',
-      moderator: message.author,
-      target: null,
-      reason: 'AI trigger (mention/reply)',
-      extraFields: [
-        { name: 'Channel', value: `${message.channel} (\`${message.channel.id}\`)`, inline: false },
-        { name: 'User message', value: toEmbedFieldValue(message.content, { maxLength: 1024 }), inline: false },
-        { name: 'AI output', value: toEmbedFieldValue(aiText, { maxLength: 1024 }), inline: false },
-        { name: 'Reviewed', value: String(!!lastSendRes.reviewed), inline: true },
-      ],
-      color: 0x57f287,
-    });
-    await sendLogEmbed({ guild: message.guild, config, getGuildConfig, client }, embed);
+    if (isGuildContext) {
+      const embed = buildModLogEmbed({
+        title: 'AI reply generated',
+        moderator: message.author,
+        target: null,
+        reason: 'AI trigger (mention/reply)',
+        extraFields: [
+          { name: 'Channel', value: `${message.channel} (\`${message.channel.id}\`)`, inline: false },
+          { name: 'User message', value: toEmbedFieldValue(message.content, { maxLength: 1024 }), inline: false },
+          { name: 'AI output', value: toEmbedFieldValue(aiText, { maxLength: 1024 }), inline: false },
+          { name: 'Reviewed', value: String(!!lastSendRes.reviewed), inline: true },
+        ],
+        color: 0x57f287,
+      });
+      await sendLogEmbed({ guild: message.guild, config, getGuildConfig, client }, embed);
+    }
     } finally {
       stopTyping();
       aiInFlight.delete(message.id);
@@ -4702,6 +4728,30 @@ function applyGroqProvider(modelId) {
         // Fire and forget
         runAiChat(message, context).catch(() => {});
       }
+    }
+
+    if (isDmChatTrigger({ message, prefix })) {
+      const dmContext = {
+        isRandomTrigger: false,
+        triggerReason: 'dm',
+        replySource: null,
+      };
+
+      const repliedMessage = await fetchReferenceMessage(message).catch(() => null);
+      if (repliedMessage) {
+        dmContext.repliedToMessageId = repliedMessage.id;
+        dmContext.repliedText = repliedMessage.content;
+        dmContext.repliedAuthorId = repliedMessage.author?.id;
+        dmContext.repliedAuthorTag = repliedMessage.author?.tag;
+        dmContext.repliedAuthorDisplayName =
+          repliedMessage.author?.globalName || repliedMessage.author?.username;
+        dmContext.repliedAuthorIsMod = false;
+        dmContext.repliedAuthorIsBot = !!repliedMessage.author?.bot;
+      }
+
+      // Fire and forget
+      runAiChat(message, dmContext).catch(() => {});
+      return;
     }
 
     // Prefix commands

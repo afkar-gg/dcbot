@@ -58,6 +58,19 @@ async function detectAiTrigger({
   };
 }
 
+function isDmChatTrigger({ message, prefix = 's.' } = {}) {
+  if (!message || message?.author?.bot) return false;
+  if (message?.guild) return false;
+
+  const channelType = message?.channel?.type;
+  const isDmType = channelType === 1 || channelType === 3;
+  if (!isDmType) return false;
+
+  const text = String(message?.content || '');
+  return !text.startsWith(String(prefix || ''));
+}
+
 module.exports = {
   detectAiTrigger,
+  isDmChatTrigger,
 };
