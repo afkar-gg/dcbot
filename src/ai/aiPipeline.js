@@ -83,7 +83,7 @@ function buildAiSystemPrompt({
   runtimeRules.push(
     hostileUserTone
       ? 'user tone is hostile; you may clap back with short witty roast lines, but keep it non-hateful'
-      : 'if user tone is neutral, keep tone chill and playful'
+      : 'if user tone is neutral, keep tone snarky, playfully annoying, and concise'
   );
 
   const modeRules = [];

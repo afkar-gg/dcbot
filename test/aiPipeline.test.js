@@ -131,6 +131,21 @@ test('system prompt injects detected language runtime rules', () => {
   assert.equal(prompt.includes('reply in Indonesian (id)'), true);
 });
 
+test('system prompt enforces high-snark baseline with very low emoji density', () => {
+  const prompt = buildAiSystemPrompt({
+    botName: 'Goose',
+    botDisplayName: 'Goose',
+    botUsernameTag: 'Goose#9289',
+    currentDateTime: null,
+    preferredReplyLocale: 'en',
+    hostileUserTone: false,
+  });
+
+  assert.equal(prompt.includes('sound gen z with high snark; playful teasing and mildly annoying energy are welcome'), true);
+  assert.equal(prompt.includes('use emojis very rarely: default is none, max 1 only when it clearly improves tone, and never use 🙏'), true);
+  assert.equal(prompt.includes('if user tone is neutral, keep tone snarky, playfully annoying, and concise'), true);
+});
+
 test('language lock appends strict locale instructions for non-english locale', () => {
   const locked = buildLanguageLockSystemPrompt('base', 'es');
   assert.equal(locked.includes('LANGUAGE LOCK'), true);

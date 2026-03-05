@@ -128,5 +128,5 @@ Changes the prefix for the current server.
 - Ban-channel enforcement uses Discord built-in ban message deletion.
 - Loadstring storage/serving is now expected to run as a separate `sc` service. Configure bot -> sc internal API with `LOADSTRING_API_BASE_URL`, `LOADSTRING_API_TOKEN`, and `LOADSTRING_API_TIMEOUT_MS`.
 - AI now follows detected user language more aggressively (multilingual lock + retry when model drifts).
-- AI personality uses contextual Gen Z emojis (for example: 💀, 🥀, 💔) with low emoji density.
+- AI personality now uses a high-snark Gen Z tone (playful/annoying vibe), with very rare emoji usage (default none, max 1) and never uses `🙏`.
 - Exact text `yo` gets a direct quick reply: `gurt`.
