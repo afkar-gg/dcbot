@@ -4065,16 +4065,24 @@ function applyGroqProvider(modelId) {
       .reverse();
 
     let randomContextMessages = [];
-    if (replyContextMessages.length === 0 && context.isRandomTrigger) {
-      randomContextMessages = [];
+    const shouldUseDmRandomContext = !isGuildContext && context.isRandomTrigger;
+    if (shouldUseDmRandomContext) {
+      const recentMessages = await fetchRecentChannelMessages(message, MAX_RANDOM_CONTEXT_SCAN).catch(() => []);
+      randomContextMessages = selectAdaptiveFallbackContext(recentMessages, message, {
+        minKeep: MIN_RANDOM_CONTEXT_KEEP,
+        maxKeep: MAX_RANDOM_CONTEXT_KEEP,
+        prefix,
+      });
     }
 
-    const contextMessages =
-      replyContextMessages.length > 0
+    const contextMessages = shouldUseDmRandomContext
+      ? randomContextMessages
+      : replyContextMessages.length > 0
         ? replyContextMessages
         : randomContextMessages;
-    const contextLabel =
-      replyContextMessages.length > 0
+    const contextLabel = shouldUseDmRandomContext
+      ? (randomContextMessages.length > 0 ? 'Recent channel context' : '')
+      : replyContextMessages.length > 0
         ? 'Chat context'
         : randomContextMessages.length > 0
           ? 'Recent channel context'
@@ -4082,13 +4090,14 @@ function applyGroqProvider(modelId) {
     const contextText = contextMessages.length
       ? contextMessages.map((m) => formatMessageForContext(m)).join('\n\n')
       : '';
+    const threadSignalMessages = shouldUseDmRandomContext ? [] : replyContextMessages;
     const threadParticipants = new Set(
-      replyContextMessages
+      threadSignalMessages
         .map((m) => String(m?.author?.id || ''))
         .filter(Boolean)
     );
     const currentAuthorId = message?.author?.id ? String(message.author.id) : '';
-    const threadNewParticipantLine = THREAD_NEW_PARTICIPANT_SIGNAL && replyContextMessages.length > 0
+    const threadNewParticipantLine = THREAD_NEW_PARTICIPANT_SIGNAL && threadSignalMessages.length > 0
       ? `Conversation signal: thread_participants=${threadParticipants.size}, current_author_new_to_thread=${
         currentAuthorId && !threadParticipants.has(currentAuthorId) ? 'yes' : 'no'
       }`
@@ -5026,8 +5035,8 @@ function applyGroqProvider(modelId) {
 
     if (isDmChatTrigger({ message, prefix })) {
       const dmContext = {
-        isRandomTrigger: false,
-        triggerReason: 'dm',
+        isRandomTrigger: true,
+        triggerReason: 'random',
         replySource: null,
       };
 
