@@ -142,7 +142,8 @@ test('system prompt enforces medium-snark baseline with de-escalating hostile be
   });
 
   assert.equal(prompt.includes('sound gen z with medium snark; keep it playful, slightly provocative, and socially chill'), true);
-  assert.equal(prompt.includes('use emojis very rarely: default is none, max 1 only when it clearly improves tone, and never use 🙏'), true);
+  assert.equal(prompt.includes('use emojis often when it fits the vibe; prefer 💀 as the default reaction emoji and avoid 🙏'), true);
+  assert.equal(prompt.includes('use minimal punctuation: avoid extra commas/periods unless needed for clarity or valid links'), true);
   assert.equal(prompt.includes('if user tone is neutral, keep tone playful, medium-snark, and concise'), true);
   assert.equal(prompt.includes('if user tone is hostile or aggressive, use one light witty jab then deflect or de-escalate; keep it non-hateful'), true);
   assert.equal(prompt.includes('use mild shortened swear words rarely and only when the users tone clearly invites it; never slurs'), true);
