@@ -35,12 +35,14 @@ The bot includes a metadata block containing:
 ## Prompt Building
 - System prompts are composed from JSON rule files in `src/ai/prompts/`.
 - Runtime rules and mode rules (edit mode, attachments, web results) are appended to the system prompt.
+- A detected reply language is injected as runtime context; the model is instructed to stay in that language unless the user switches.
 - The final user payload is a combination of context text, metadata, and the user's message.
 
 ## Output Processing
 - Raw model output is stripped of any `<think>` or `<analysis>` blocks.
 - Output is sanitized to prevent prompt leaks, reasoning leaks, member-facts leaks, or gibberish.
 - If the output is blocked, the bot retries once with a strict system prompt.
+- If language detection says non-English and model output drifts into English, the bot retries once with a language-lock system prompt.
 
 ## Fallback Behavior
 - If sanitization fails, the bot returns a context-specific fallback message:
@@ -54,3 +56,4 @@ The bot includes a metadata block containing:
 - Role mentions are converted to readable names without pinging.
 - Mentions like @everyone and @here are neutralized to prevent pings.
 - Replies are sent through a moderation review system when enabled.
+- Exact quick-reply rule: message text `yo` returns `gurt` without an LLM call.

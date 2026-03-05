@@ -1,6 +1,28 @@
 const aiPromptConfig = require('./prompts/aiSystemPrompt.json');
 const rawPromptConfig = require('./prompts/rawSystemPrompt.json');
 
+const LOCALE_NAME_MAP = {
+  en: 'English',
+  id: 'Indonesian',
+  es: 'Spanish',
+  pt: 'Portuguese',
+  fr: 'French',
+  de: 'German',
+  tr: 'Turkish',
+  ar: 'Arabic',
+  ru: 'Russian',
+  ja: 'Japanese',
+  ko: 'Korean',
+  zh: 'Chinese',
+};
+
+function normalizeReplyLocale(locale) {
+  const raw = String(locale || 'en').trim().toLowerCase();
+  if (!raw) return 'en';
+  const base = raw.split(/[-_]/)[0];
+  return LOCALE_NAME_MAP[base] ? base : 'en';
+}
+
 function interpolateTemplate(text, values = {}) {
   return String(text || '').replace(/\{\{(\w+)\}\}/g, (_match, key) => {
     const replacement = values[key];
@@ -22,6 +44,7 @@ function buildAiSystemPrompt({
   editIntent = false,
   hasWebResults = false,
   hasExecutorTracker = false,
+  preferredReplyLocale = 'en',
 }) {
   const name = botName || 'Goose';
   const displayName = botDisplayName || name;
@@ -41,6 +64,8 @@ function buildAiSystemPrompt({
     : applyTemplateList(aiPromptConfig.attachmentRulesNoAttachments, templateValues);
 
   const runtimeRules = [];
+  const localeCode = normalizeReplyLocale(preferredReplyLocale);
+  const localeName = LOCALE_NAME_MAP[localeCode] || 'English';
   if (currentDateTime?.localText && currentDateTime?.isoUtc) {
     runtimeRules.push(
       `current datetime in ${currentDateTime.timeZone} is ${currentDateTime.localText}`,
@@ -48,6 +73,12 @@ function buildAiSystemPrompt({
       'if user asks for current date/time, use this runtime context exactly'
     );
   }
+  runtimeRules.push(
+    `detected user language is ${localeName} (${localeCode})`,
+    localeCode === 'en'
+      ? 'reply in english unless the user explicitly switches language'
+      : `reply in ${localeName} (${localeCode}) unless the user explicitly switches language`
+  );
 
   const modeRules = [];
   if (editIntent) {
@@ -95,8 +126,11 @@ function buildRawAiSystemPrompt({
   editIntent = false,
   hasWebResults = false,
   hasExecutorTracker = false,
+  preferredReplyLocale = 'en',
 }) {
   const base = [...applyTemplateList(rawPromptConfig.baseRules, {})];
+  const localeCode = normalizeReplyLocale(preferredReplyLocale);
+  const localeName = LOCALE_NAME_MAP[localeCode] || 'English';
 
   if (currentDateTime?.localText && currentDateTime?.isoUtc) {
     base.push(
@@ -105,6 +139,12 @@ function buildRawAiSystemPrompt({
       'if user asks date or time use this runtime context'
     );
   }
+  base.push(
+    `detected user language is ${localeName} (${localeCode})`,
+    localeCode === 'en'
+      ? 'reply in english unless user explicitly switches language'
+      : `reply in ${localeName} (${localeCode}) unless user explicitly switches language`
+  );
 
   if (allowAttachments) {
     base.push(...applyTemplateList(rawPromptConfig.attachmentRulesWithAttachments, {}));
@@ -140,6 +180,18 @@ function buildStrictSystemPrompt(basePrompt, reasons = []) {
     `The previous draft was blocked by the output sanitizer (${reasonText}).`,
     'Regenerate a safe final user-facing answer without metadata headers or hidden reasoning.',
   ].join(' ');
+}
+
+function buildLanguageLockSystemPrompt(basePrompt, locale = 'en') {
+  const localeCode = normalizeReplyLocale(locale);
+  const localeName = LOCALE_NAME_MAP[localeCode] || 'English';
+  if (localeCode === 'en') return String(basePrompt || '');
+
+  return [
+    String(basePrompt || ''),
+    `LANGUAGE LOCK: detected user language is ${localeName} (${localeCode}).`,
+    `Reply only in ${localeName} (${localeCode}) unless the user explicitly switches language.`,
+  ].join('\n');
 }
 
 function clampNumber(value, min, max) {
@@ -228,5 +280,7 @@ module.exports = {
   buildAiSystemPrompt,
   buildRawAiSystemPrompt,
   buildStrictSystemPrompt,
+  buildLanguageLockSystemPrompt,
+  normalizeReplyLocale,
   computeDynamicTemperature,
 };

@@ -32,8 +32,8 @@ const {
 const { buildModLogEmbed, sendLogEmbed } = require('./services/logService');
 const { groqChatCompletion, groqImageCaption, groqImageOcr, listGroqModels } = require('./services/groqService');
 const { neutralizeMentions } = require('./utils/sanitize');
+const { createLoadstringStore } = require('./services/loadstringApiStore');
 const {
-  createLoadstringStore,
   LOADSTRING_PUBLIC_BASE_URL,
   LOADSTRING_MAX_PER_USER,
   isSupportedLoadstringAttachment,
@@ -62,6 +62,7 @@ const {
   buildAiSystemPrompt,
   buildRawAiSystemPrompt,
   buildStrictSystemPrompt,
+  buildLanguageLockSystemPrompt,
   computeDynamicTemperature,
 } = require('./ai/aiPipeline');
 const { shouldIncludeAuthorFactsTarget } = require('./ai/memberFacts');
@@ -76,6 +77,8 @@ const {
   collapseRepetitiveLines,
 } = require('./ai/outputGuard');
 const { detectReplyLanguage, getLocalizedAttachmentNotice } = require('./ai/noticeI18n');
+const { shouldRetryForLocaleMismatch } = require('./ai/languageGuard');
+const { getExactQuickReply } = require('./ai/quickReplies');
 const { buildSanitizedFallbackText } = require('./ai/sanitizedFallback');
 const { computeAiChatTimeoutMs } = require('./ai/timeoutPolicy');
 const {
@@ -2469,14 +2472,14 @@ function createBot({ loadstringStore } = {}) {
       stripControlChars(message.author?.globalName || '') ||
       message.author.id;
     const scriptName = stripControlChars(parsed.scriptName);
-    const existingBefore = lsStore.getLoadstringForUser({
-      ownerUserId: message.author.id,
-      scriptNameOrSlug: scriptName,
-    });
-
+    let existingBefore = null;
     let record;
     try {
-      record = lsStore.upsertLoadstring({
+      existingBefore = await lsStore.getLoadstringForUser({
+        ownerUserId: message.author.id,
+        scriptNameOrSlug: scriptName,
+      });
+      record = await lsStore.upsertLoadstring({
         ownerUserId: message.author.id,
         ownerUsername: username,
         scriptName,
@@ -2492,7 +2495,7 @@ function createBot({ loadstringStore } = {}) {
       }
 
       await safeReply(message, {
-        content: `failed to save loadstring: ${e?.message || 'unknown error'}`,
+        content: `failed to save loadstring: ${e?.message || 'loadstring service unavailable'}`,
         allowedMentions: allowedMentionsSafe(),
       });
       return;
@@ -2585,14 +2588,14 @@ function createBot({ loadstringStore } = {}) {
       stripControlChars(interaction.user?.username || '') ||
       stripControlChars(interaction.user?.globalName || '') ||
       interaction.user.id;
-    const existingBefore = lsStore.getLoadstringForUser({
-      ownerUserId: interaction.user.id,
-      scriptNameOrSlug: scriptName,
-    });
-
+    let existingBefore = null;
     let record;
     try {
-      record = lsStore.upsertLoadstring({
+      existingBefore = await lsStore.getLoadstringForUser({
+        ownerUserId: interaction.user.id,
+        scriptNameOrSlug: scriptName,
+      });
+      record = await lsStore.upsertLoadstring({
         ownerUserId: interaction.user.id,
         ownerUsername: username,
         scriptName,
@@ -2608,7 +2611,7 @@ function createBot({ loadstringStore } = {}) {
       }
 
       await interaction.reply({
-        content: `failed to save loadstring: ${e?.message || 'unknown error'}`,
+        content: `failed to save loadstring: ${e?.message || 'loadstring service unavailable'}`,
         ephemeral: !!interaction.guildId,
       });
       return;
@@ -2680,7 +2683,17 @@ function createBot({ loadstringStore } = {}) {
   }
 
   async function handleListLoadstringsCommand(message) {
-    const rows = lsStore.listLoadstringsForUser(message.author.id);
+    let rows = [];
+    try {
+      rows = await lsStore.listLoadstringsForUser(message.author.id);
+    } catch (e) {
+      await safeReply(message, {
+        content: `failed to list loadstrings: ${e?.message || 'loadstring service unavailable'}`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+      return;
+    }
+
     if (rows.length === 0) {
       await safeReply(message, {
         content: 'you have no loadstrings yet',
@@ -2722,10 +2735,19 @@ function createBot({ loadstringStore } = {}) {
       return;
     }
 
-    const res = lsStore.removeLoadstringForUser({
-      ownerUserId: message.author.id,
-      scriptNameOrSlug: targetName,
-    });
+    let res;
+    try {
+      res = await lsStore.removeLoadstringForUser({
+        ownerUserId: message.author.id,
+        scriptNameOrSlug: targetName,
+      });
+    } catch (e) {
+      await safeReply(message, {
+        content: `failed to remove loadstring: ${e?.message || 'loadstring service unavailable'}`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+      return;
+    }
 
     if (!res?.removed) {
       await safeReply(message, {
@@ -2766,10 +2788,19 @@ function createBot({ loadstringStore } = {}) {
       return;
     }
 
-    const found = lsStore.getLoadstringForUser({
-      ownerUserId: message.author.id,
-      scriptNameOrSlug: targetName,
-    });
+    let found = null;
+    try {
+      found = await lsStore.getLoadstringForUser({
+        ownerUserId: message.author.id,
+        scriptNameOrSlug: targetName,
+      });
+    } catch (e) {
+      await safeReply(message, {
+        content: `failed to fetch loadstring info: ${e?.message || 'loadstring service unavailable'}`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+      return;
+    }
     if (!found?.record) {
       await safeReply(message, {
         content: `loadstring \`${targetName}\` was not found`,
@@ -2815,7 +2846,17 @@ function createBot({ loadstringStore } = {}) {
   }
 
   async function handleSlashListLoadstringsCommand(interaction) {
-    const rows = lsStore.listLoadstringsForUser(interaction.user.id);
+    let rows = [];
+    try {
+      rows = await lsStore.listLoadstringsForUser(interaction.user.id);
+    } catch (e) {
+      await interaction.reply({
+        content: `failed to list loadstrings: ${e?.message || 'loadstring service unavailable'}`,
+        ephemeral: !!interaction.guildId,
+      });
+      return;
+    }
+
     if (rows.length === 0) {
       await interaction.reply({
         content: 'you have no loadstrings yet',
@@ -2856,10 +2897,19 @@ function createBot({ loadstringStore } = {}) {
 
   async function handleSlashRemoveLoadstringCommand(interaction) {
     const targetName = normalizeLoadstringName(interaction.options.getString('name', true));
-    const res = lsStore.removeLoadstringForUser({
-      ownerUserId: interaction.user.id,
-      scriptNameOrSlug: targetName,
-    });
+    let res;
+    try {
+      res = await lsStore.removeLoadstringForUser({
+        ownerUserId: interaction.user.id,
+        scriptNameOrSlug: targetName,
+      });
+    } catch (e) {
+      await interaction.reply({
+        content: `failed to remove loadstring: ${e?.message || 'loadstring service unavailable'}`,
+        ephemeral: !!interaction.guildId,
+      });
+      return;
+    }
 
     if (!res?.removed) {
       await interaction.reply({
@@ -2893,10 +2943,19 @@ function createBot({ loadstringStore } = {}) {
 
   async function handleSlashLoadstringInfoCommand(interaction) {
     const targetName = normalizeLoadstringName(interaction.options.getString('name', true));
-    const found = lsStore.getLoadstringForUser({
-      ownerUserId: interaction.user.id,
-      scriptNameOrSlug: targetName,
-    });
+    let found = null;
+    try {
+      found = await lsStore.getLoadstringForUser({
+        ownerUserId: interaction.user.id,
+        scriptNameOrSlug: targetName,
+      });
+    } catch (e) {
+      await interaction.reply({
+        content: `failed to fetch loadstring info: ${e?.message || 'loadstring service unavailable'}`,
+        ephemeral: !!interaction.guildId,
+      });
+      return;
+    }
     if (!found?.record) {
       await interaction.reply({
         content: `loadstring \`${targetName}\` was not found`,
@@ -3157,6 +3216,19 @@ function applyGroqProvider(modelId) {
       .replaceAll(botMentionB, '')
       .trim();
     const prompt = rawPrompt || '[ping only no text]';
+    const preferredReplyLocale = detectReplyLanguage({
+      messageText: rawPrompt || message.content || '',
+      repliedText: context?.repliedText || '',
+    });
+
+    const quickReply = getExactQuickReply(rawPrompt);
+    if (quickReply) {
+      await safeReplyTracked(message, {
+        content: quickReply,
+        allowedMentions: allowedMentionsSafe(),
+      }, 'ai-quick-reply');
+      return;
+    }
 
     // Rate limit (defense-in-depth).
     if (!context?.rateLimitSkip) {
@@ -3382,10 +3454,7 @@ function applyGroqProvider(modelId) {
     }
 
     if (currentHasMedia) {
-      const noticeLocale = detectReplyLanguage({
-        messageText: message.content || '',
-        repliedText: context?.repliedText || '',
-      });
+      const noticeLocale = preferredReplyLocale;
 
       if (!allowAttachments && hasFileAttachments) {
         const attachReply = getLocalizedAttachmentNotice('attachments_disabled', noticeLocale);
@@ -3620,6 +3689,7 @@ function applyGroqProvider(modelId) {
           editIntent,
           hasWebResults: webResults.length > 0 || directPages.length > 0,
           hasExecutorTracker: !!executorTrackerBlock,
+          preferredReplyLocale,
         })
       : buildAiSystemPrompt({
           botName,
@@ -3630,6 +3700,7 @@ function applyGroqProvider(modelId) {
           editIntent,
           hasWebResults: webResults.length > 0 || directPages.length > 0,
           hasExecutorTracker: !!executorTrackerBlock,
+          preferredReplyLocale,
         });
 
     // Typing indicator is already running (started early). We'll stop it in the finalizer.
@@ -3811,6 +3882,32 @@ function applyGroqProvider(modelId) {
       aiText = stripModelThinking(aiText);
     } else {
       aiText = String(aiText || '').trim();
+    }
+
+    if (shouldRetryForLocaleMismatch({
+      expectedLocale: preferredReplyLocale,
+      userText: rawPrompt || message.content || '',
+      outputText: aiText,
+    })) {
+      try {
+        const languageLockedSystem = buildLanguageLockSystemPrompt(systemText, preferredReplyLocale);
+        const retryLangText = await callAiOnce({
+          system: languageLockedSystem,
+          temperature: Math.min(temperature, 0.6),
+          maxTokens,
+        });
+        aiText = aiRawMode
+          ? String(retryLangText || '').trim()
+          : stripModelThinking(retryLangText);
+      } catch (langRetryErr) {
+        console.error('[ai-chat] language lock retry failed', {
+          guildId: message.guild?.id || '',
+          channelId: message.channel?.id || '',
+          messageId: message.id,
+          preferredReplyLocale,
+          error: summarizeErr(langRetryErr),
+        });
+      }
     }
 
     if (editIntent && editTarget) {
@@ -4211,6 +4308,7 @@ function applyGroqProvider(modelId) {
 
     const isGuildMessage = !!message.guild;
     const guildCfg = isGuildMessage ? getGuildConfig(config, message.guild.id) : null;
+    const prefix = isGuildMessage ? (guildCfg.prefix || DEFAULT_PREFIX) : DEFAULT_PREFIX;
 
     if (isGuildMessage && guildCfg.banChannelId && message.channel.id === guildCfg.banChannelId) {
       if (message.author.id !== EXEMPT_USER_ID) {
@@ -4241,6 +4339,15 @@ function applyGroqProvider(modelId) {
           console.error('Failed to enforce ban channel rule:', err);
         }
       }
+      return;
+    }
+
+    const quickReply = getExactQuickReply(message.content || '');
+    if (quickReply && !String(message.content || '').startsWith(prefix)) {
+      await safeReplyTracked(message, {
+        content: quickReply,
+        allowedMentions: allowedMentionsSafe(),
+      }, 'quick-reply-yo');
       return;
     }
 
@@ -4319,7 +4426,6 @@ function applyGroqProvider(modelId) {
     }
 
     // Prefix commands
-    const prefix = isGuildMessage ? (guildCfg.prefix || DEFAULT_PREFIX) : DEFAULT_PREFIX;
     if (!message.content.startsWith(prefix)) return;
 
     const [rawCmd, ...args] = message.content.slice(prefix.length).trim().split(/\s+/);

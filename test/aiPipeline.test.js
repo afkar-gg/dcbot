@@ -1,7 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { computeDynamicTemperature } = require('../src/ai/aiPipeline');
+const {
+  computeDynamicTemperature,
+  buildAiSystemPrompt,
+  buildLanguageLockSystemPrompt,
+} = require('../src/ai/aiPipeline');
 
 test('uses low band for simple short message', () => {
   const temperature = computeDynamicTemperature({
@@ -112,4 +116,23 @@ test('empty input returns medium-safe default band', () => {
   });
 
   assert.equal(temperature, 0.68);
+});
+
+test('system prompt injects detected language runtime rules', () => {
+  const prompt = buildAiSystemPrompt({
+    botName: 'Goose',
+    botDisplayName: 'Goose',
+    botUsernameTag: 'Goose#9289',
+    currentDateTime: null,
+    preferredReplyLocale: 'id',
+  });
+
+  assert.equal(prompt.includes('detected user language is Indonesian (id)'), true);
+  assert.equal(prompt.includes('reply in Indonesian (id)'), true);
+});
+
+test('language lock appends strict locale instructions for non-english locale', () => {
+  const locked = buildLanguageLockSystemPrompt('base', 'es');
+  assert.equal(locked.includes('LANGUAGE LOCK'), true);
+  assert.equal(locked.includes('Spanish (es)'), true);
 });

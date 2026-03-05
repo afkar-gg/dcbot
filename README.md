@@ -126,4 +126,7 @@ Changes the prefix for the current server.
 - Guaranteed visible AI fallback reply can be configured with `AI_FORCE_VISIBLE_REPLY` and `AI_FALLBACK_REPLY_TEXT`.
 - Date/time answers use runtime clock context. Optional: set `BOT_TIMEZONE` (default `UTC`) and `BOT_TIME_LOCALE` (default `en-US`) in `config.json`.
 - Ban-channel enforcement uses Discord built-in ban message deletion.
-- Loadstring web host listens on `127.0.0.1:3006` by default (configurable with `LOADSTRING_WEB_PORT`).
+- Loadstring storage/serving is now expected to run as a separate `sc` service. Configure bot -> sc internal API with `LOADSTRING_API_BASE_URL`, `LOADSTRING_API_TOKEN`, and `LOADSTRING_API_TIMEOUT_MS`.
+- AI now follows detected user language more aggressively (multilingual lock + retry when model drifts).
+- AI personality uses contextual Gen Z emojis (for example: 💀, 🥀, 💔) with low emoji density.
+- Exact text `yo` gets a direct quick reply: `gurt`.

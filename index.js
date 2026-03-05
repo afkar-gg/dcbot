@@ -1,6 +1,4 @@
 const { createBot } = require('./src/bot');
-const { createLoadstringStore, LOADSTRING_WEB_PORT } = require('./src/services/loadstringService');
-const { createLoadstringWebServer } = require('./src/services/loadstringWebService');
 
 // Keep the process alive on unexpected runtime errors.
 // Discord bots should prefer logging + continuing over hard-crashing.
@@ -13,16 +11,7 @@ process.on('uncaughtException', (err) => {
 });
 
 async function bootstrap() {
-  const loadstringStore = createLoadstringStore();
-  const loadstringWebServer = createLoadstringWebServer({
-    loadstringStore,
-    port: LOADSTRING_WEB_PORT,
-  });
-
-  await loadstringWebServer.start();
-  console.log(`Loadstring web server listening on 127.0.0.1:${LOADSTRING_WEB_PORT}`);
-
-  const bot = createBot({ loadstringStore });
+  const bot = createBot();
 
   // Console listener: paste a Groq key (gsk_...) into the process stdin to auto-add it.
   // Useful when API keys get rotated and you want a fast, no-Discord-command way to add keys.
