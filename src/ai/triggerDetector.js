@@ -62,8 +62,9 @@ function isDmChatTrigger({ message, prefix = 's.' } = {}) {
   if (!message || message?.author?.bot) return false;
   if (message?.guild) return false;
 
+  const isDmBased = !!message?.channel?.isDMBased?.();
   const channelType = message?.channel?.type;
-  const isDmType = channelType === 1 || channelType === 3;
+  const isDmType = isDmBased || channelType === 1 || channelType === 3;
   if (!isDmType) return false;
 
   const text = String(message?.content || '');

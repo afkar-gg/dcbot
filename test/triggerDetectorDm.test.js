@@ -8,10 +8,14 @@ function buildMessage({
   channelType = 1,
   content = 'hello',
   authorBot = false,
+  isDMBased = null,
 } = {}) {
   return {
     guild,
-    channel: { type: channelType },
+    channel: {
+      type: channelType,
+      ...(typeof isDMBased === 'boolean' ? { isDMBased: () => isDMBased } : {}),
+    },
     content,
     author: { bot: authorBot },
   };
@@ -29,6 +33,11 @@ test('dm trigger does not fire for prefixed messages', () => {
 
 test('dm trigger includes group dms', () => {
   const message = buildMessage({ channelType: 3, content: 'what up' });
+  assert.equal(isDmChatTrigger({ message, prefix: 's.' }), true);
+});
+
+test('dm trigger works when channel type is missing but channel is dm-based', () => {
+  const message = buildMessage({ channelType: undefined, isDMBased: true, content: 'sup' });
   assert.equal(isDmChatTrigger({ message, prefix: 's.' }), true);
 });
 

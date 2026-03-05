@@ -1,6 +1,7 @@
 const {
   Client,
   GatewayIntentBits,
+  Partials,
   ActivityType,
   ActionRowBuilder,
   ButtonBuilder,
@@ -2527,8 +2528,10 @@ function createBot({ loadstringStore } = {}) {
       GatewayIntentBits.GuildMembers,
       GatewayIntentBits.GuildPresences,
       GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.DirectMessages,
       GatewayIntentBits.MessageContent,
     ],
+    partials: [Partials.Channel],
   });
 
   // Presence rotation
