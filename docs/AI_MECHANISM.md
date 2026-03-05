@@ -34,7 +34,7 @@ The bot includes a metadata block containing:
 
 ## Prompt Building
 - System prompts are composed from JSON rule files in `src/ai/prompts/`.
-- Personality baseline is high-snark Gen Z (playful/annoying), with emoji usage set to very rare (default none, max 1) and `🙏` explicitly disallowed.
+- Personality baseline is medium-snark Gen Z (playful ragebait, less abrasive), with emoji usage set to very rare (default none, max 1) and `🙏` explicitly disallowed.
 - Runtime rules and mode rules (edit mode, attachments, web results) are appended to the system prompt.
 - A detected reply language is injected as runtime context; the model is instructed to stay in that language unless the user switches.
 - The final user payload is a combination of context text, metadata, and the user's message.

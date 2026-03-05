@@ -131,7 +131,7 @@ test('system prompt injects detected language runtime rules', () => {
   assert.equal(prompt.includes('reply in Indonesian (id)'), true);
 });
 
-test('system prompt enforces high-snark baseline with very low emoji density', () => {
+test('system prompt enforces medium-snark baseline with de-escalating hostile behavior', () => {
   const prompt = buildAiSystemPrompt({
     botName: 'Goose',
     botDisplayName: 'Goose',
@@ -141,9 +141,11 @@ test('system prompt enforces high-snark baseline with very low emoji density', (
     hostileUserTone: false,
   });
 
-  assert.equal(prompt.includes('sound gen z with high snark; playful teasing and mildly annoying energy are welcome'), true);
+  assert.equal(prompt.includes('sound gen z with medium snark; keep it playful, slightly provocative, and socially chill'), true);
   assert.equal(prompt.includes('use emojis very rarely: default is none, max 1 only when it clearly improves tone, and never use 🙏'), true);
-  assert.equal(prompt.includes('if user tone is neutral, keep tone snarky, playfully annoying, and concise'), true);
+  assert.equal(prompt.includes('if user tone is neutral, keep tone playful, medium-snark, and concise'), true);
+  assert.equal(prompt.includes('if user tone is hostile or aggressive, use one light witty jab then deflect or de-escalate; keep it non-hateful'), true);
+  assert.equal(prompt.includes('use mild shortened swear words rarely and only when the users tone clearly invites it; never slurs'), true);
 });
 
 test('language lock appends strict locale instructions for non-english locale', () => {
