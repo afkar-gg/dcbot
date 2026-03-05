@@ -6,12 +6,20 @@ const {
   listGroqModels,
 } = require('../src/services/groqService');
 
-function makeJsonResponse(body, status = 200) {
+function makeJsonResponse(body, status = 200, headers = {}) {
   const raw = JSON.stringify(body);
+  const headerMap = new Map(
+    Object.entries(headers).map(([key, value]) => [String(key || '').toLowerCase(), String(value || '')])
+  );
   return {
     ok: status >= 200 && status < 300,
     status,
     text: async () => raw,
+    headers: {
+      get(name) {
+        return headerMap.get(String(name || '').toLowerCase()) || null;
+      },
+    },
   };
 }
 
@@ -129,4 +137,41 @@ test('listGroqModels excludes deprecated models by default', async () => {
 
   const models = await listGroqModels({ apiKey: 'gsk_test' });
   assert.deepEqual(models.map((m) => m.id), ['llama-3.3-70b-versatile']);
+});
+
+test('chat 429 exposes retryAfterMs from Retry-After header', async () => {
+  global.fetch = async () =>
+    makeJsonResponse({ error: { message: 'rate limited' } }, 429, { 'retry-after': '3' });
+
+  await assert.rejects(
+    () =>
+      groqChatCompletion({
+        apiKey: 'gsk_test',
+        messages: [{ role: 'user', content: 'hello' }],
+        model: 'llama-3.3-70b-versatile',
+        timeoutMs: 2000,
+      }),
+    (err) => {
+      assert.equal(err?.status, 429);
+      assert.equal(Number(err?.retryAfterMs) >= 3000, true);
+      return true;
+    }
+  );
+});
+
+test('models 429 exposes retryAfterMs from body text', async () => {
+  global.fetch = async () =>
+    makeJsonResponse({ error: { message: 'Try again in 12s' } }, 429);
+
+  await assert.rejects(
+    () =>
+      listGroqModels({
+        apiKey: 'gsk_test',
+      }),
+    (err) => {
+      assert.equal(err?.status, 429);
+      assert.equal(Number(err?.retryAfterMs) >= 12_000, true);
+      return true;
+    }
+  );
 });

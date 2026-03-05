@@ -1,10 +1,10 @@
 const LOCALE_KEYWORDS = {
-  id: ['aku', 'kamu', 'tolong', 'yang', 'nggak', 'bisa'],
-  es: ['hola', 'por', 'favor', 'puedes', 'esto', 'como'],
-  pt: ['ola', 'por', 'favor', 'voce', 'isso', 'obrigado'],
-  fr: ['bonjour', 'merci', 'peux', 'fichier', 'comment'],
-  de: ['hallo', 'bitte', 'danke', 'kannst', 'nicht'],
-  tr: ['merhaba', 'lutfen', 'yardim', 'nasil', 'degil'],
+  id: ['aku', 'kamu', 'tolong', 'yang', 'nggak', 'enggak', 'tidak', 'gak', 'bisa'],
+  es: ['hola', 'gracias', 'por', 'favor', 'puedes', 'esto', 'como', 'porque'],
+  pt: ['ola', 'por', 'favor', 'voce', 'isso', 'obrigado', 'obrigada', 'porque'],
+  fr: ['bonjour', 'merci', 'peux', 'fichier', 'comment', 'pourquoi'],
+  de: ['hallo', 'bitte', 'danke', 'kannst', 'nicht', 'warum'],
+  tr: ['merhaba', 'lutfen', 'yardim', 'nasil', 'degil', 'neden'],
 };
 
 const ENGLISH_STOPWORDS = new Set([
@@ -33,8 +33,14 @@ function detectScriptLocale(text) {
 function hasLocaleKeyword(text, locale) {
   const keywords = LOCALE_KEYWORDS[locale] || [];
   if (keywords.length === 0) return false;
-  const lower = String(text || '').toLowerCase();
-  return keywords.some((keyword) => new RegExp(`(?:^|\\s)${keyword}(?:$|\\s)`, 'i').test(lower));
+  const tokenSet = new Set(
+    String(text || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\u00c0-\u024f]+/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean)
+  );
+  return keywords.some((keyword) => tokenSet.has(keyword));
 }
 
 function isLikelyEnglishText(text) {

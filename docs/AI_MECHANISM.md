@@ -9,7 +9,7 @@ This document explains how the AI flow works in this bot: trigger, context assem
 ## Context Assembly
 - Reply chain context is collected when a user replies to a message. The chain is capped to a configured depth.
 - For short messages, the bot skips deep context to reduce latency.
-- If no reply chain is available and the trigger is random, the bot samples recent channel messages.
+- If no reply chain is available and the trigger is random, the bot treats it as a standalone ambient jump-in.
 - Context lines are formatted with author tag, display name, user id, and text content.
 
 ### Metadata Block
@@ -25,7 +25,7 @@ The bot includes a metadata block containing:
 - Member facts are only collected when the user explicitly asks for member info and provides a target.
 - Explicit targets include: mentions, replies, explicit user IDs, quoted names, or @handles.
 - Self and bot lookups are treated as explicit targets when the user asks for their own or the bot's info.
-- If a member cannot be resolved, the bot asks for an @mention or a valid ID instead of guessing.
+- If member lookup is explicitly requested and cannot be resolved, the bot asks for an @mention or a valid ID instead of guessing.
 
 ## Web Search and Executor Tracker
 - Web search results are included only when a search intent is detected.

@@ -151,6 +151,7 @@ const FALLBACK_AI_REPLY_TEXT = String(AI_FALLBACK_REPLY_TEXT || 'i glitched lol 
 const API_LIST_PAGE_SIZE = 5;
 const API_LIST_PANEL_TTL_MS = 30 * 60_000;
 const GROQ_MODEL_CACHE_TTL_MS = 10 * 60_000;
+const GROQ_RATE_LIMIT_FALLBACK_MS = 30_000;
 
 async function pingCreatorInGlobalLog(client, config, { guild, text } = {}) {
   try {
@@ -270,6 +271,45 @@ function summarizeErr(err) {
   return statusText || msg || 'unknown error';
 }
 
+function isGroqRateLimitError(err) {
+  return Number(err?.status) === 429;
+}
+
+function parseRetryAfterMsFromText(text = '') {
+  const raw = String(text || '');
+  if (!raw) return 0;
+  const lower = raw.toLowerCase();
+
+  const match = lower.match(/try again in\s+([0-9]+(?:\.[0-9]+)?)\s*(ms|msec|millisecond|milliseconds|s|sec|secs|second|seconds|m|min|mins|minute|minutes)?/i);
+  if (!match) return 0;
+  const value = Number(match[1]);
+  const unit = String(match[2] || 's').toLowerCase();
+  if (!Number.isFinite(value) || value < 0) return 0;
+  if (unit.startsWith('ms')) return Math.floor(value);
+  if (unit.startsWith('m') && !unit.startsWith('ms')) return Math.floor(value * 60_000);
+  return Math.floor(value * 1000);
+}
+
+function resolveGroqRetryAfterMs(err) {
+  const direct = Number(err?.retryAfterMs);
+  if (Number.isFinite(direct) && direct > 0) return Math.floor(direct);
+
+  const fromBody = parseRetryAfterMsFromText(err?.body || err?.message || '');
+  if (fromBody > 0) return fromBody;
+  return 0;
+}
+
+function formatRetryAfterHuman(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return 'a moment';
+  if (n < 1000) return '1s';
+  const sec = Math.ceil(n / 1000);
+  if (sec < 60) return `${sec}s`;
+  const mins = Math.floor(sec / 60);
+  const rem = sec % 60;
+  return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
+}
+
 function isGroqCreditDepletedError(err) {
   const status = Number(err?.status);
   const body = String(err?.body || err?.message || '').toLowerCase();
@@ -327,7 +367,8 @@ function buildHelpText(prefix, { includeAll = false } = {}) {
     lines.push(`• \`${prefix}q <on|off|toggle|status>\` - Toggle raw AI mode (no personality/sanitize shaping)`);
     lines.push(`• \`${prefix}addgq <key>\` - Save a Groq API key to the managed key pool`);
     lines.push(`• \`${prefix}rmgq <key|masked>\` - Remove a saved Groq API key`);
-    lines.push(`• \`${prefix}lsgq\` - List saved Groq keys, usage stats, and available Groq models`);
+    lines.push(`• \`${prefix}lsgq\` - List saved Groq keys, usage stats, and key availability`);
+    lines.push(`• \`${prefix}lsgqmodel\` - List available Groq models`);
     lines.push(`• \`${prefix}setgq <modelId>\` - Set the active Groq chat model`);
     lines.push(`• \`${prefix}servers [noinvites]\` - DM server inventory (optionally without invites)`);
     lines.push(`• \`${prefix}setglog <#channel|channelId|off>\` - Set or disable the global low-credit log channel`);
@@ -338,7 +379,12 @@ function buildHelpText(prefix, { includeAll = false } = {}) {
 }
 
 async function dmHelp(user, prefix, options) {
-  return user.send({ content: buildHelpText(prefix, options) });
+  const text = buildHelpText(prefix, options);
+  const chunks = chunkLines(String(text || '').split(/\r?\n/g), 1800);
+  for (const chunk of chunks) {
+    // eslint-disable-next-line no-await-in-loop
+    await user.send({ content: chunk });
+  }
 }
 
 function stripControlChars(text) {
@@ -1678,7 +1724,7 @@ function buildMemberFactsFallbackText(memberFactsBlock) {
       return identityOnly || raw;
     })
     .filter(Boolean);
-  if (lines.length === 0) return 'cant verify member facts rn use @mention or id';
+  if (lines.length === 0) return '';
   if (lines.length === 1) return lines[0];
   const preview = lines.slice(0, 2).join(' | ');
   return lines.length > 2 ? `${preview} | +${lines.length - 2} more` : preview;
@@ -1693,6 +1739,100 @@ function normalizeAiStyle(text) {
   out = out.replace(/[ \t]+\n/g, '\n');
   out = out.replace(/\n{3,}/g, '\n\n');
   return out.trim();
+}
+
+function escapeRegex(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isHostileUserText(text = '') {
+  const lower = String(text || '').toLowerCase();
+  if (!lower) return false;
+  const hostilitySignals = [
+    /\b(shut up|stfu|fk you|fuck you|f you|idiot|dumbass|moron|npc|retard|trash bot|useless bot)\b/i,
+    /\b(mad|angry|furious|annoyed|pissed)\b/i,
+  ];
+  return hostilitySignals.some((re) => re.test(lower));
+}
+
+function addMentionAlias(set, value) {
+  const raw = stripControlChars(value || '');
+  if (!raw) return;
+  const clean = raw.replace(/^@+/, '').trim();
+  if (clean.length < 2) return;
+  if (/^\d+$/.test(clean)) return;
+  set.add(clean);
+}
+
+function upsertMentionTarget(map, id, names = []) {
+  const userId = String(id || '').trim();
+  if (!/^\d{5,}$/.test(userId)) return;
+  if (!map.has(userId)) map.set(userId, new Set());
+  const aliases = map.get(userId);
+  for (const name of names) addMentionAlias(aliases, name);
+}
+
+function buildAiMentionTargetMap(message, context = {}) {
+  const targetMap = new Map();
+  const authorId = String(message?.author?.id || '');
+  upsertMentionTarget(targetMap, authorId, [
+    message?.member?.displayName,
+    message?.author?.globalName,
+    message?.author?.username,
+    message?.author?.tag,
+  ]);
+
+  const repliedId = String(context?.repliedAuthorId || '');
+  if (repliedId) {
+    const repliedTag = String(context?.repliedAuthorTag || '').trim();
+    const repliedUsername = repliedTag.includes('#') ? repliedTag.split('#')[0] : repliedTag;
+    upsertMentionTarget(targetMap, repliedId, [
+      context?.repliedAuthorDisplayName,
+      repliedTag,
+      repliedUsername,
+    ]);
+  }
+
+  return targetMap;
+}
+
+function convertKnownUsernamesToMentions(text, mentionTargetMap) {
+  let output = String(text || '');
+  if (!output) return { text: '', userIds: [] };
+  if (!(mentionTargetMap instanceof Map) || mentionTargetMap.size === 0) {
+    return { text: output, userIds: [] };
+  }
+
+  const aliases = [];
+  for (const [id, names] of mentionTargetMap.entries()) {
+    for (const alias of names.values()) {
+      aliases.push({ id, alias });
+    }
+  }
+  aliases.sort((a, b) => b.alias.length - a.alias.length);
+
+  const usedIds = new Set();
+  for (const item of aliases) {
+    const escaped = escapeRegex(item.alias);
+    if (!escaped) continue;
+    const pattern = new RegExp(`(^|[^A-Za-z0-9_])(${escaped})(?=$|[^A-Za-z0-9_])`, 'gi');
+    output = output.replace(pattern, (full, prefix, rawAlias, offset, fullText) => {
+      // Do not alter explicit mention tokens.
+      const start = Math.max(0, Number(offset) - 2);
+      const end = Math.min(fullText.length, Number(offset) + String(full || '').length + 2);
+      const near = fullText.slice(start, end);
+      if (/<@!?\d+>/.test(near)) return full;
+      usedIds.add(item.id);
+      return `${prefix === '@' ? '' : prefix}<@${item.id}>`;
+    });
+  }
+
+  const explicitIds = [...output.matchAll(/<@!?(\d+)>/g)].map((m) => String(m[1] || ''));
+  for (const id of explicitIds) {
+    if (mentionTargetMap.has(id)) usedIds.add(id);
+  }
+
+  return { text: output, userIds: [...usedIds] };
 }
 
 function extractExecutorTrackerTopEntryLine(executorTrackerBlock) {
@@ -1937,13 +2077,16 @@ function allowedMentionsAiSafe() {
   };
 }
 
-function allowedMentionsAiReplyPing() {
+function allowedMentionsAiReplyPing(userIds = []) {
+  const safeUserIds = Array.isArray(userIds)
+    ? userIds.map((id) => String(id || '').trim()).filter((id) => /^\d{5,}$/.test(id))
+    : [];
   // For AI chatbot replies: ping ONLY the user being replied to.
   // Still blocks @everyone/@here/roles/user mentions inside content.
   return {
     parse: [],
     roles: [],
-    users: [],
+    users: safeUserIds,
     repliedUser: true,
   };
 }
@@ -2081,6 +2224,9 @@ function createBot({ loadstringStore } = {}) {
       lastSuccessAt: normalizeUsageCount(raw?.lastSuccessAt),
       lastFailureAt: normalizeUsageCount(raw?.lastFailureAt),
       lastError: String(raw?.lastError || '').trim(),
+      blockedUntilAt: normalizeUsageCount(raw?.blockedUntilAt),
+      last429At: normalizeUsageCount(raw?.last429At),
+      lastRetryAfterMs: normalizeUsageCount(raw?.lastRetryAfterMs),
     };
   }
 
@@ -2123,6 +2269,10 @@ function createBot({ loadstringStore } = {}) {
     if (ok) {
       record.success += 1;
       record.lastSuccessAt = now;
+      if (record.blockedUntilAt && record.blockedUntilAt <= now) {
+        record.blockedUntilAt = 0;
+        record.lastRetryAfterMs = 0;
+      }
     } else {
       record.failed += 1;
       record.lastFailureAt = now;
@@ -2134,12 +2284,97 @@ function createBot({ loadstringStore } = {}) {
     scheduleGroqUsageSave();
   }
 
+  function markGroqKeyRateLimited(keyRaw = '', err) {
+    const key = String(keyRaw || '').trim();
+    if (!isManagedGroqKey(key)) return;
+    const record = ensureGroqUsageRecord(key);
+    if (!record) return;
+
+    const now = Date.now();
+    const retryAfterMs = Math.max(resolveGroqRetryAfterMs(err), GROQ_RATE_LIMIT_FALLBACK_MS);
+    const blockedUntilAt = now + retryAfterMs;
+    record.last429At = now;
+    record.lastRetryAfterMs = retryAfterMs;
+    record.blockedUntilAt = blockedUntilAt;
+    groqUsageDirty = true;
+    scheduleGroqUsageSave();
+  }
+
+  function clearGroqKeyRateLimitIfExpired(keyRaw = '') {
+    const key = String(keyRaw || '').trim();
+    if (!isManagedGroqKey(key)) return;
+    const record = ensureGroqUsageRecord(key);
+    if (!record) return;
+    const now = Date.now();
+    if (record.blockedUntilAt && record.blockedUntilAt <= now) {
+      record.blockedUntilAt = 0;
+      record.lastRetryAfterMs = 0;
+      groqUsageDirty = true;
+      scheduleGroqUsageSave();
+    }
+  }
+
+  function isGroqKeyAvailableNow(keyRaw = '', now = Date.now()) {
+    const key = String(keyRaw || '').trim();
+    if (!isManagedGroqKey(key)) return true;
+    const stats = readGroqUsageStats(key);
+    if (!stats.blockedUntilAt) return true;
+    return stats.blockedUntilAt <= now;
+  }
+
+  function getGroqKeyPoolWithAvailability(keys = []) {
+    const now = Date.now();
+    const available = [];
+    const cooling = [];
+    for (const key of keys) {
+      const k = String(key || '').trim();
+      if (!k) continue;
+      clearGroqKeyRateLimitIfExpired(k);
+      const stats = readGroqUsageStats(k);
+      const blockedUntilAt = Number(stats.blockedUntilAt) || 0;
+      if (!isManagedGroqKey(k) || !blockedUntilAt || blockedUntilAt <= now) {
+        available.push(k);
+      } else {
+        cooling.push({ key: k, blockedUntilAt });
+      }
+    }
+    cooling.sort((a, b) => a.blockedUntilAt - b.blockedUntilAt);
+    return { available, cooling };
+  }
+
+  function buildAllGroqKeysCoolingError(cooling = []) {
+    const first = Array.isArray(cooling) && cooling.length > 0 ? cooling[0] : null;
+    const retryAfterMs = first ? Math.max(0, Number(first.blockedUntilAt || 0) - Date.now()) : GROQ_RATE_LIMIT_FALLBACK_MS;
+    const err = new Error('All Groq keys are temporarily rate-limited');
+    err.code = 'GROQ_KEYS_RATE_LIMITED';
+    err.status = 429;
+    err.retryAfterMs = retryAfterMs;
+    err.retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+    return err;
+  }
+
   function formatUsageTimestamp(ts) {
     const n = Number(ts);
     if (!Number.isFinite(n) || n <= 0) return 'never';
     const unixSeconds = Math.floor(n / 1000);
     if (!Number.isFinite(unixSeconds) || unixSeconds <= 0) return 'never';
     return `<t:${unixSeconds}:R>`;
+  }
+
+  function formatAvailabilityTimestamp(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    const unixSeconds = Math.floor(n / 1000);
+    if (!Number.isFinite(unixSeconds) || unixSeconds <= 0) return '';
+    return `<t:${unixSeconds}:R>`;
+  }
+
+  function formatGroqKeyAvailability(stats = {}) {
+    const blockedUntilAt = Number(stats?.blockedUntilAt || 0);
+    if (!blockedUntilAt) return 'ready';
+    if (blockedUntilAt <= Date.now()) return 'ready';
+    const ts = formatAvailabilityTimestamp(blockedUntilAt);
+    return ts ? `rate-limited until ${ts}` : 'rate-limited';
   }
 
   function buildApiListPanelComponents({ panelId, page, totalPages }) {
@@ -2177,6 +2412,7 @@ function createBot({ loadstringStore } = {}) {
         `**Inference:** ${entry.stats.total} (ok ${entry.stats.success} | fail ${entry.stats.failed})`,
         `**Chat:** ${entry.stats.chat} | **Img Caption:** ${entry.stats.imageCaption} | **Img OCR:** ${entry.stats.imageOcr}`,
         `**Last Used:** ${entry.lastUsed}`,
+        `**Availability:** ${entry.availability || 'ready'}`,
       ].join('\n'),
       inline: false,
     }));
@@ -2250,16 +2486,25 @@ function createBot({ loadstringStore } = {}) {
       return { models: cache.models, source: 'cache', stale: false };
     }
 
-    const keys = getGroqKeyPool();
+    const keyPool = getGroqKeyPool();
+    const { available, cooling } = getGroqKeyPoolWithAvailability(keyPool);
+    const keys = available;
     let lastErr = null;
+    if (keys.length === 0 && cooling.length > 0) {
+      lastErr = buildAllGroqKeysCoolingError(cooling);
+    }
     for (const key of keys) {
       try {
         // eslint-disable-next-line no-await-in-loop
         const models = await listGroqModels({ apiKey: key, includeDeprecated: false });
+        clearGroqKeyRateLimitIfExpired(key);
         const ids = [...new Set(models.map((m) => normalizeGroqModelId(m.id)).filter(Boolean))];
         const stored = writeCachedGroqModels(ids);
         return { models: stored, source: 'api', stale: false };
       } catch (e) {
+        if (isGroqRateLimitError(e)) {
+          markGroqKeyRateLimited(key, e);
+        }
         lastErr = e;
       }
     }
@@ -3220,6 +3465,7 @@ function applyGroqProvider(modelId) {
       messageText: rawPrompt || message.content || '',
       repliedText: context?.repliedText || '',
     });
+    const hostileUserTone = isHostileUserText(rawPrompt || message.content || '');
 
     const quickReply = getExactQuickReply(rawPrompt);
     if (quickReply) {
@@ -3292,7 +3538,7 @@ function applyGroqProvider(modelId) {
         }
       }
 
-      const keyPoolForImages = (groqKeys.length > 0 ? groqKeys : [GROQ_API_KEY]).filter(Boolean);
+      const rawKeyPoolForImages = (groqKeys.length > 0 ? groqKeys : [GROQ_API_KEY]).filter(Boolean);
 
       const webQuery = extractWebSearchQuery(message.content || '');
       let webResults = [];
@@ -3332,7 +3578,9 @@ function applyGroqProvider(modelId) {
     }
 
     async function analyzeImage(attachment) {
-      if (!allowAttachments || !keyPoolForImages.length) return { caption: '', ocrText: '' };
+      if (!allowAttachments || !rawKeyPoolForImages.length) return { caption: '', ocrText: '' };
+      const { available: keyPoolForImages } = getGroqKeyPoolWithAvailability(rawKeyPoolForImages);
+      if (!keyPoolForImages.length) return { caption: '', ocrText: '' };
       const size = Number(attachment?.size || 0);
       if (size && size > MAX_IMAGE_ATTACHMENT_BYTES) return { caption: '', ocrText: '' };
 
@@ -3377,12 +3625,16 @@ function applyGroqProvider(modelId) {
             ok: false,
             error: captionErr,
           });
+          if (isGroqRateLimitError(captionResult.reason)) {
+            markGroqKeyRateLimited(key, captionResult.reason);
+          }
           console.error(
             `[ai-media] caption failed for ${imageName} via ${imageModel} (${maskedKey}):`,
             captionErr
           );
         } else {
           markGroqInferenceUsage(key, { kind: 'imageCaption', ok: true });
+          clearGroqKeyRateLimitIfExpired(key);
         }
         if (ocrResult.status === 'rejected') {
           const ocrErr = summarizeErr(ocrResult.reason);
@@ -3391,12 +3643,16 @@ function applyGroqProvider(modelId) {
             ok: false,
             error: ocrErr,
           });
+          if (isGroqRateLimitError(ocrResult.reason)) {
+            markGroqKeyRateLimited(key, ocrResult.reason);
+          }
           console.error(
             `[ai-media] ocr failed for ${imageName} via ${ocrModel} (${maskedKey}):`,
             ocrErr
           );
         } else {
           markGroqInferenceUsage(key, { kind: 'imageOcr', ok: true });
+          clearGroqKeyRateLimitIfExpired(key);
         }
         if (caption || ocrText) {
           return {
@@ -3424,6 +3680,7 @@ function applyGroqProvider(modelId) {
         includeFileAttachments: allowAttachments,
       })
       : null;
+    let aiReplyMentionUserIds = [];
 
     async function sendAiNotice(content, source = 'ai-notice') {
       const sendOutcome = await sendAiReplyGuaranteed({
@@ -3437,8 +3694,9 @@ function applyGroqProvider(modelId) {
           replyToMessageId: message.id,
           content: text,
           source: 'ai',
-          allowedMentions: allowedMentionsAiReplyPing(),
+          allowedMentions: allowedMentionsAiReplyPing(aiReplyMentionUserIds),
           noMentionsOnApprove: true,
+          mentionUserIds: aiReplyMentionUserIds,
         }),
         sendFallback: (text) => safeReplyTracked(message, {
           content: text,
@@ -3528,12 +3786,7 @@ function applyGroqProvider(modelId) {
 
     let randomContextMessages = [];
     if (replyContextMessages.length === 0 && context.isRandomTrigger) {
-      const recentMessages = await fetchRecentChannelMessages(message, MAX_RANDOM_CONTEXT_SCAN).catch(() => []);
-      randomContextMessages = selectAdaptiveFallbackContext(recentMessages, message, {
-        minKeep: MIN_RANDOM_CONTEXT_KEEP,
-        maxKeep: MAX_RANDOM_CONTEXT_KEEP,
-        prefix,
-      });
+      randomContextMessages = [];
     }
 
     const contextMessages =
@@ -3591,6 +3844,9 @@ function applyGroqProvider(modelId) {
         ? `\nAttachments:\n${attachmentContext.lines.join('\n')}`
         : '';
     const triggerFlag = context.isRandomTrigger ? 'Trigger: random' : 'Trigger: direct';
+    const randomTriggerNote = context.isRandomTrigger
+      ? '\nRandom trigger mode: ambient jump-in. you were not previously in this conversation.'
+      : '';
     const executorLines = executorTrackerBlock
       ? `\nExecutor tracker (WEAO live):\n${executorTrackerBlock}`
       : '';
@@ -3666,6 +3922,7 @@ function applyGroqProvider(modelId) {
     const metadataBlock =
       `${serverMetaLine}\n${dateTimeMetaLine}\n${attachmentFlag}\n${mediaFlag}\n${triggerFlag}\n${contextAvailabilityLine}` +
       `${threadNewParticipantLine ? `\n${threadNewParticipantLine}` : ''}` +
+      `${randomTriggerNote}` +
       `${executorErrorLine}${attachmentLines}${executorLines}${webLines}${directLines}${memberFactsBlock}${visibleChannelsBlock}`;
 
     const userPayload = contextText
@@ -3690,6 +3947,7 @@ function applyGroqProvider(modelId) {
           hasWebResults: webResults.length > 0 || directPages.length > 0,
           hasExecutorTracker: !!executorTrackerBlock,
           preferredReplyLocale,
+          hostileUserTone,
         })
       : buildAiSystemPrompt({
           botName,
@@ -3701,6 +3959,7 @@ function applyGroqProvider(modelId) {
           hasWebResults: webResults.length > 0 || directPages.length > 0,
           hasExecutorTracker: !!executorTrackerBlock,
           preferredReplyLocale,
+          hostileUserTone,
         });
 
     // Typing indicator is already running (started early). We'll stop it in the finalizer.
@@ -3743,7 +4002,11 @@ function applyGroqProvider(modelId) {
 
     let aiText = '';
     async function callAiOnce({ system, temperature = 0.9, maxTokens = 420 } = {}) {
-      const keyPool = (groqKeys.length > 0 ? groqKeys : [GROQ_API_KEY]).filter(Boolean);
+      const rawPool = (groqKeys.length > 0 ? groqKeys : [GROQ_API_KEY]).filter(Boolean);
+      const { available: keyPool, cooling } = getGroqKeyPoolWithAvailability(rawPool);
+      if (keyPool.length === 0 && cooling.length > 0) {
+        throw buildAllGroqKeysCoolingError(cooling);
+      }
       let lastErr = null;
 
       for (const key of keyPool) {
@@ -3764,6 +4027,7 @@ function applyGroqProvider(modelId) {
 
           lastErr = null;
           markGroqInferenceUsage(key, { kind: 'chat', ok: true });
+          clearGroqKeyRateLimitIfExpired(key);
           groqDepletedCounts.delete(key);
           if (!String(text || '').trim()) {
             console.error('[ai-chat] Groq returned blank text payload', {
@@ -3782,6 +4046,9 @@ function applyGroqProvider(modelId) {
             ok: false,
             error: summarizeErr(e),
           });
+          if (isGroqRateLimitError(e)) {
+            markGroqKeyRateLimited(key, e);
+          }
           console.error('[ai-chat] Groq call failed', {
             guildId: message.guild?.id || '',
             channelId: message.channel?.id || '',
@@ -3796,6 +4063,7 @@ function applyGroqProvider(modelId) {
             finishReason: e?.finishReason || '',
             error: summarizeErr(e),
             responsePreview: String(e?.responsePreview || e?.body || '').slice(0, 260),
+            retryAfterMs: Number(e?.retryAfterMs || 0),
           });
 
           if (isGroqCreditDepletedError(e)) {
@@ -3844,6 +4112,10 @@ function applyGroqProvider(modelId) {
             continue;
           }
 
+          if (isGroqRateLimitError(e)) {
+            continue;
+          }
+
           groqDepletedCounts.delete(key);
           // try next key
         }
@@ -3872,7 +4144,9 @@ function applyGroqProvider(modelId) {
       await safeReply(message, {
         content: isGroqCreditDepletedError(e)
           ? 'groq credits cooked no keys left'
-          : 'my bad ai is taking too long try again in a sec',
+          : isGroqRateLimitError(e)
+            ? `groq rate-limited rn, try again in ${formatRetryAfterHuman(resolveGroqRetryAfterMs(e) || 0)}`
+            : 'my bad ai is taking too long try again in a sec',
         allowedMentions: allowedMentionsAiReplyPing(),
       });
       return;
@@ -4074,7 +4348,8 @@ function applyGroqProvider(modelId) {
     if (wantsMemberFacts) {
       const memberConfident = isMemberFactsAnswerConfident(aiText, memberFactsBlock);
       if (!memberConfident) {
-        fallbackParts.push(buildMemberFactsFallbackText(memberFactsBlock));
+        const memberFallback = buildMemberFactsFallbackText(memberFactsBlock);
+        if (memberFallback) fallbackParts.push(memberFallback);
       }
     }
     if (wantsExecutorStatusFacts) {
@@ -4094,9 +4369,13 @@ function applyGroqProvider(modelId) {
     if (!aiRawMode) {
       // Replace role mentions with readable role names (no ping), then neutralize mentions.
       aiText = await replaceRoleMentionsWithNames(aiText, message.guild);
+      const mentionTargets = buildAiMentionTargetMap(message, context);
+      const mentionRewrite = convertKnownUsernamesToMentions(aiText, mentionTargets);
+      aiText = mentionRewrite.text;
+      aiReplyMentionUserIds = mentionRewrite.userIds;
 
       // Extra safety: neutralize visible mass-mentions in AI output.
-      aiText = neutralizeMentions(aiText);
+      aiText = neutralizeMentions(aiText, { allowUserIds: aiReplyMentionUserIds });
     }
     aiText = normalizeAiStyle(aiText);
 
@@ -4777,12 +5056,14 @@ function applyGroqProvider(modelId) {
 
       const keys = Array.isArray(config.groqApiKeys) ? config.groqApiKeys : [];
       const entries = keys.map((k) => {
+        clearGroqKeyRateLimitIfExpired(k);
         const stats = readGroqUsageStats(k);
         const lastUsed = formatUsageTimestamp(stats.lastUsedAt);
         return {
           masked: maskApiKey(k),
           stats,
           lastUsed,
+          availability: formatGroqKeyAvailability(stats),
         };
       });
 
@@ -4813,12 +5094,25 @@ function applyGroqProvider(modelId) {
           allowedMentions: allowedMentionsSafe(),
         });
       }
+      return;
+    }
+
+    if (cmd === 'lsgqmodel') {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
+        await safeReply(message, {
+          content: pickRoast(),
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
 
       const current = resolveGroqChatModel();
       const modelState = await fetchAvailableGroqModels();
       const modelLines = modelState.models.length
         ? modelState.models.map((m, i) => `${i + 1}. ${m}`)
-        : ['(no model list available yet)'];
+        : modelState.error && isGroqRateLimitError(modelState.error)
+          ? [`(all keys cooling down, retry in ${formatRetryAfterHuman(resolveGroqRetryAfterMs(modelState.error))})`]
+          : ['(no model list available yet)'];
       const staleLabel = modelState.stale ? ' (stale)' : '';
       const header = `groq models (deprecated excluded) (current: ${current}) | source: ${modelState.source}${staleLabel}`;
       const chunks = chunkLines([header, '', ...modelLines], 1750);
@@ -4856,7 +5150,7 @@ function applyGroqProvider(modelId) {
       if (!match) {
         await safeReply(message, {
           content: modelState.models.length
-            ? `invalid model. run \`${prefix}lsgq\` to see available models`
+            ? `invalid model. run \`${prefix}lsgqmodel\` to see available models`
             : 'could not fetch Groq model list. add a valid Groq key and try again',
           allowedMentions: allowedMentionsSafe(),
         });

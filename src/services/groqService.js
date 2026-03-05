@@ -11,6 +11,55 @@ function logGroqDebug(event, details = {}) {
   console.error(`[groq] ${event}`, details);
 }
 
+function parseRetryAfterMsFromHeaders(headers) {
+  const raw = headers?.get?.('retry-after');
+  if (!raw) return 0;
+  const retryAfter = String(raw || '').trim();
+  if (!retryAfter) return 0;
+
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.max(0, Math.floor(seconds * 1000));
+  }
+
+  const when = Date.parse(retryAfter);
+  if (Number.isFinite(when)) {
+    return Math.max(0, when - Date.now());
+  }
+  return 0;
+}
+
+function parseRetryAfterMsFromBody(body) {
+  const raw = String(body || '');
+  if (!raw) return 0;
+  const lower = raw.toLowerCase();
+
+  const jsonRetry = lower.match(/retry[_-\s]?after[^0-9]*([0-9]+(?:\.[0-9]+)?)/i);
+  if (jsonRetry) {
+    const n = Number(jsonRetry[1]);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n * 1000);
+  }
+
+  const tryAgain = lower.match(/try again in\s+([0-9]+(?:\.[0-9]+)?)\s*(ms|msec|millisecond|milliseconds|s|sec|secs|second|seconds|m|min|mins|minute|minutes)?/i);
+  if (tryAgain) {
+    const value = Number(tryAgain[1]);
+    const unit = String(tryAgain[2] || 's').toLowerCase();
+    if (Number.isFinite(value) && value >= 0) {
+      if (unit.startsWith('ms')) return Math.floor(value);
+      if (unit.startsWith('m') && !unit.startsWith('ms')) return Math.floor(value * 60_000);
+      return Math.floor(value * 1000);
+    }
+  }
+
+  return 0;
+}
+
+function extractRetryAfterMs({ headers, body } = {}) {
+  const fromHeaders = parseRetryAfterMsFromHeaders(headers);
+  if (fromHeaders > 0) return fromHeaders;
+  return parseRetryAfterMsFromBody(body);
+}
+
 function parseOpenAiText(content) {
   if (typeof content === 'string') return content.trim();
   if (content && typeof content === 'object' && !Array.isArray(content)) {
@@ -111,10 +160,16 @@ async function groqChatCompletion({
       err.body = rawBody;
       err.model = modelName;
       err.finishReason = data?.choices?.[0]?.finish_reason || '';
+      const retryAfterMs = extractRetryAfterMs({ headers: res.headers, body: rawBody });
+      if (retryAfterMs > 0) {
+        err.retryAfterMs = retryAfterMs;
+        err.retryAfterSeconds = Math.ceil(retryAfterMs / 1000);
+      }
       logGroqDebug('http_error', {
         model: modelName,
         status: res.status,
         finishReason: err.finishReason,
+        retryAfterMs: err.retryAfterMs || 0,
         bodyPreview: truncateForLog(rawBody, 420),
       });
       throw err;
@@ -211,6 +266,11 @@ async function listGroqModels({ apiKey, timeoutMs = 15_000, includeDeprecated = 
       err.code = 'GROQ_MODELS_HTTP_ERROR';
       err.status = res.status;
       err.body = rawBody;
+      const retryAfterMs = extractRetryAfterMs({ headers: res.headers, body: rawBody });
+      if (retryAfterMs > 0) {
+        err.retryAfterMs = retryAfterMs;
+        err.retryAfterSeconds = Math.ceil(retryAfterMs / 1000);
+      }
       throw err;
     }
 
@@ -292,6 +352,11 @@ async function runVisionPrompt({
       err.status = res.status;
       err.body = rawBody;
       err.model = model;
+      const retryAfterMs = extractRetryAfterMs({ headers: res.headers, body: rawBody });
+      if (retryAfterMs > 0) {
+        err.retryAfterMs = retryAfterMs;
+        err.retryAfterSeconds = Math.ceil(retryAfterMs / 1000);
+      }
       throw err;
     }
 

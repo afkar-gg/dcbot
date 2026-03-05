@@ -45,6 +45,7 @@ function buildAiSystemPrompt({
   hasWebResults = false,
   hasExecutorTracker = false,
   preferredReplyLocale = 'en',
+  hostileUserTone = false,
 }) {
   const name = botName || 'Goose';
   const displayName = botDisplayName || name;
@@ -78,6 +79,11 @@ function buildAiSystemPrompt({
     localeCode === 'en'
       ? 'reply in english unless the user explicitly switches language'
       : `reply in ${localeName} (${localeCode}) unless the user explicitly switches language`
+  );
+  runtimeRules.push(
+    hostileUserTone
+      ? 'user tone is hostile; you may clap back with short witty roast lines, but keep it non-hateful'
+      : 'if user tone is neutral, keep tone chill and playful'
   );
 
   const modeRules = [];
@@ -127,6 +133,7 @@ function buildRawAiSystemPrompt({
   hasWebResults = false,
   hasExecutorTracker = false,
   preferredReplyLocale = 'en',
+  hostileUserTone = false,
 }) {
   const base = [...applyTemplateList(rawPromptConfig.baseRules, {})];
   const localeCode = normalizeReplyLocale(preferredReplyLocale);
@@ -144,6 +151,11 @@ function buildRawAiSystemPrompt({
     localeCode === 'en'
       ? 'reply in english unless user explicitly switches language'
       : `reply in ${localeName} (${localeCode}) unless user explicitly switches language`
+  );
+  base.push(
+    hostileUserTone
+      ? 'if user is hostile you can clap back with short witty roasts but no hateful content'
+      : 'keep tone playful and concise'
   );
 
   if (allowAttachments) {

@@ -75,6 +75,7 @@ function createMentionReviewSubsystem({
     content,
     source,
     noMentionsOnApprove = false,
+    mentionUserIds = [],
   }) {
     const guildCfg = getGuildConfig(config, guild.id);
     const globalLogChannelId = config?.globalLogChannelId || null;
@@ -159,6 +160,9 @@ function createMentionReviewSubsystem({
       source,
       content,
       noMentionsOnApprove,
+      mentionUserIds: Array.isArray(mentionUserIds)
+        ? mentionUserIds.map((id) => String(id || '').trim()).filter((id) => /^\d{5,}$/.test(id))
+        : [],
       expiresAt: Date.now() + 60_000,
     });
 
@@ -185,6 +189,7 @@ function createMentionReviewSubsystem({
     source,
     allowedMentions,
     noMentionsOnApprove,
+    mentionUserIds,
     files,
   }) {
     const danger = detectDangerousMentions(content);
@@ -230,6 +235,7 @@ function createMentionReviewSubsystem({
         content,
         source,
         noMentionsOnApprove: !!noMentionsOnApprove,
+        mentionUserIds,
       });
     } catch (e) {
       console.error('Mention review request failed:', e);
@@ -283,7 +289,7 @@ function createMentionReviewSubsystem({
       const allowEveryone = danger.hasEveryone || danger.hasHere;
 
       const approvedAllowedMentions = pending.noMentionsOnApprove
-        ? allowedMentionsAiReplyPing()
+        ? allowedMentionsAiReplyPing(pending.mentionUserIds || [])
         : allowedMentionsApproved({ roleIds: danger.roleIds, allowEveryone });
 
       if (pending.replyToMessageId) {
