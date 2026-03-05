@@ -24,7 +24,7 @@ async function bootstrap() {
 
   const bot = createBot({ loadstringStore });
 
-  // Console listener: paste a HuggingFace key (hf_...) into the process stdin to auto-add it.
+  // Console listener: paste a Groq key (gsk_...) into the process stdin to auto-add it.
   // Useful when API keys get rotated and you want a fast, no-Discord-command way to add keys.
   if (process.stdin.isTTY) {
     process.stdin.setEncoding('utf8');
@@ -32,16 +32,16 @@ async function bootstrap() {
       const text = String(chunk || '').trim();
       if (!text) return;
 
-      const matches = [...text.matchAll(/\bhf_[a-zA-Z0-9]{10,}\b/g)].map((m) => m[0]);
+      const matches = [...text.matchAll(/\bgsk_[a-zA-Z0-9_-]{16,}\b/g)].map((m) => m[0]);
       if (matches.length === 0) return;
 
       for (const key of matches) {
-        const res = bot.addHfApiKey(key);
+        const res = bot.addGroqApiKey(key);
         if (res.ok) {
           const verb = res.added ? 'added' : 'already saved';
-          console.log(`[hf key] ${verb}: ${res.masked} (total ${res.total})`);
+          console.log(`[groq key] ${verb}: ${res.masked} (total ${res.total})`);
         } else {
-          console.log(`[hf key] rejected: ${res.error || 'invalid'}`);
+          console.log(`[groq key] rejected: ${res.error || 'invalid'}`);
         }
       }
     });

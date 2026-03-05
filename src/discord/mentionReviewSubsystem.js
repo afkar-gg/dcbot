@@ -97,7 +97,7 @@ function createMentionReviewSubsystem({
     if (reviewTargets.length === 0) {
       return {
         ok: false,
-        reason: 'No log channel set. Use /setlogchannel or /setgloballog first.',
+        reason: 'No log channel set. Use /setlogchannel or s.setglog first.',
       };
     }
 
@@ -144,7 +144,7 @@ function createMentionReviewSubsystem({
     if (reviewMessages.length === 0) {
       return {
         ok: false,
-        reason: 'Cant post to the log channel (missing perms?) set /setlogchannel or /setgloballog again',
+        reason: 'Cant post to the log channel (missing perms?) set /setlogchannel or s.setglog again',
       };
     }
 

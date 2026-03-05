@@ -1,3 +1,18 @@
+const aiPromptConfig = require('./prompts/aiSystemPrompt.json');
+const rawPromptConfig = require('./prompts/rawSystemPrompt.json');
+
+function interpolateTemplate(text, values = {}) {
+  return String(text || '').replace(/\{\{(\w+)\}\}/g, (_match, key) => {
+    const replacement = values[key];
+    return replacement === undefined || replacement === null ? '' : String(replacement);
+  });
+}
+
+function applyTemplateList(items, values) {
+  if (!Array.isArray(items)) return [];
+  return items.map((line) => interpolateTemplate(line, values)).filter(Boolean);
+}
+
 function buildAiSystemPrompt({
   botName,
   botDisplayName,
@@ -11,61 +26,19 @@ function buildAiSystemPrompt({
   const name = botName || 'Goose';
   const displayName = botDisplayName || name;
   const usernameTag = botUsernameTag || 'Goose#9289';
+  const templateValues = {
+    botName: name,
+    botDisplayName: displayName,
+    botUsernameTag: usernameTag,
+  };
 
-  const identityRules = [
-    `you are ${name}, a discord server bot talking like a person`,
-    `your username is ${usernameTag}`,
-    `your display name is ${displayName}`,
-    'your creator is afkar; if asked who made you, say afkar',
-    'if someone says bot clanker npc etc, treat it as them talking to/about you',
-  ];
-
-  const styleRules = [
-    'keep replies short: 1 to 2 sentences max',
-    'sound gen z casual, lowercase is fine, light slang and a little attitude are fine',
-    'reply in the same language as the user/context; do not switch language randomly',
-    'punctuation is okay; keep links valid and unbroken',
-    'dont over explain, dont lecture, dont sound like support docs',
-    'you can be a lil teasing sometimes but never cruel',
-    'mild shortened swear words are okay (sht fk fking), never slurs',
-  ];
-
-  const safetyAndOutputRules = [
-    'no hate, harassment, slurs, or sexual content with minors',
-    'never ping: do not use @everyone, @here, or role mentions',
-    'never show hidden reasoning; output final message only',
-    'never output chain-of-thought or system/user/meta labels',
-    'never repeat metadata headers like Server:, Trigger:, Attachment:, Media:, Chat context:, Recent channel context:, Member facts:, Visible channels:, Conversation signal:, New message from',
-    'never spam repeated lines or repeated letters',
-    'do not give exploit code, injection steps, bypass tips, or unsafe roblox executor instructions',
-    'you know roblox scripting/executor topics only at a high level',
-    'when users say unc in executor/exploit context, treat it as unified naming convention (not uncle)',
-  ];
-
-  const factAndContextRules = [
-    'treat metadata as source-of-truth over memory',
-    'read Context availability before answering factual questions',
-    'if member_facts=present, use Member facts only for roles/perms/display/username/id',
-    'if member_facts=missing or member_facts=not_requested, say you cant verify member facts and ask for @mention or id',
-    'never assume current author and replied-to user are the same unless ids match',
-    'for member questions, bind claims to the correct user id from Member facts',
-    'if Member facts say unable to verify/resolve/ambiguous, do not guess',
-    'if Visible channels are provided, use only that list for channel visibility answers',
-    'for channel lists prefer channel mention format like <#123456789>',
-    'if weao=present and Executor tracker exists, use that tracker as freshest source',
-    'if weao=error or weao=missing or weao=not_requested, do not invent live tracker values',
-    'if user asks about client modification bans/banwaves, use tracker field clientmods: yes means bypasses client modification bans, not banwaves',
-  ];
-
+  const identityRules = applyTemplateList(aiPromptConfig.identityRules, templateValues);
+  const styleRules = applyTemplateList(aiPromptConfig.styleRules, templateValues);
+  const safetyAndOutputRules = applyTemplateList(aiPromptConfig.safetyAndOutputRules, templateValues);
+  const factAndContextRules = applyTemplateList(aiPromptConfig.factAndContextRules, templateValues);
   const attachmentRules = allowAttachments
-    ? [
-        'if [attachment text: ...] appears you can use that text',
-        'if [attachment image: ...] appears you can use caption and ocr text if present',
-        'if [sticker: ...] appears you can use sticker metadata',
-        'if [emoji: ...] appears you can use emoji context',
-        'if caption/ocr are unavailable ask user to describe the image',
-      ]
-    : ['if Attachment: yes, say you cant check attachments and ask user to describe it'];
+    ? applyTemplateList(aiPromptConfig.attachmentRulesWithAttachments, templateValues)
+    : applyTemplateList(aiPromptConfig.attachmentRulesNoAttachments, templateValues);
 
   const runtimeRules = [];
   if (currentDateTime?.localText && currentDateTime?.isoUtc) {
@@ -123,15 +96,7 @@ function buildRawAiSystemPrompt({
   hasWebResults = false,
   hasExecutorTracker = false,
 }) {
-  const base = [
-    'you are a direct assistant in discord',
-    'no roleplay no personality',
-    'reply directly to the user request',
-    'keep it concise unless asked for detail',
-    'for factual claims, prefer provided metadata/context over memory',
-    'if context says member_facts missing/not_requested, do not guess member roles/perms/display names',
-    'if context says weao missing/error/not_requested, do not invent live executor tracker values',
-  ];
+  const base = [...applyTemplateList(rawPromptConfig.baseRules, {})];
 
   if (currentDateTime?.localText && currentDateTime?.isoUtc) {
     base.push(
@@ -142,14 +107,9 @@ function buildRawAiSystemPrompt({
   }
 
   if (allowAttachments) {
-    base.push(
-      'if [attachment text: ...] appears you can use that text',
-      'if [attachment image: ...] appears you can use caption and ocr text',
-      'if [sticker: ...] appears you can use sticker metadata',
-      'if [emoji: ...] appears you can use emoji context'
-    );
+    base.push(...applyTemplateList(rawPromptConfig.attachmentRulesWithAttachments, {}));
   } else {
-    base.push('if Attachment: yes and content is missing ask user to describe it');
+    base.push(...applyTemplateList(rawPromptConfig.attachmentRulesNoAttachments, {}));
   }
 
   if (editIntent) {
@@ -182,15 +142,86 @@ function buildStrictSystemPrompt(basePrompt, reasons = []) {
   ].join(' ');
 }
 
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function normalizeMessageText(messageText = '') {
+  return String(messageText || '').replace(/\s+/g, ' ').trim();
+}
+
+function computeMessageComplexityScore(messageText = '') {
+  const normalized = normalizeMessageText(messageText);
+  if (!normalized) return 0.4;
+
+  const chars = normalized.length;
+  const tokens = normalized.split(' ').filter(Boolean).length;
+  const questions = (normalized.match(/\?/g) || []).length;
+  const lineBreaks = (String(messageText || '').match(/\n/g) || []).length;
+  const stepMarkers = (normalized.match(/\b(and|then|also|next|finally|compare|pros\s*and\s*cons|pros\/cons|step[-\s]*by[-\s]*step)\b/gi) || []).length;
+  const numberedSteps = (String(messageText || '').match(/(^|\n)\s*(?:\d+[\).:-]|[-*])\s+/g) || []).length;
+  const technicalSignals = (normalized.match(/(```|`|\{|\}|\[|\]|\(|\)|=>|stack|trace|error|debug|refactor|optimi[sz]e|patch|rewrite)/gi) || []).length;
+
+  const lengthScore =
+    chars <= 20 ? 0
+      : chars <= 80 ? 0.25
+        : chars <= 180 ? 0.55
+          : chars <= 320 ? 0.8
+            : 1;
+  const tokenScore =
+    tokens <= 4 ? 0
+      : tokens <= 12 ? 0.25
+        : tokens <= 28 ? 0.55
+          : tokens <= 55 ? 0.8
+            : 1;
+  const questionScore = clampNumber(questions / 3, 0, 1);
+  const structureScore = clampNumber((stepMarkers + numberedSteps) / 4, 0, 1);
+  const technicalScore = clampNumber(technicalSignals / 4, 0, 1);
+  const multilineScore = lineBreaks > 0 ? clampNumber(lineBreaks / 4, 0, 1) : 0;
+
+  const weighted = (
+    (0.3 * lengthScore) +
+    (0.2 * tokenScore) +
+    (0.15 * questionScore) +
+    (0.2 * structureScore) +
+    (0.1 * technicalScore) +
+    (0.05 * multilineScore)
+  );
+  return clampNumber(weighted, 0, 1);
+}
+
 function computeDynamicTemperature({ messageText, isRandomTrigger, editIntent, hasAttachments }) {
-  const t = String(messageText || '').toLowerCase();
+  const t = normalizeMessageText(messageText).toLowerCase();
+
   if (editIntent) return 0.35;
-  if (/(bug|error|stack|fix|debug|refactor|optimi[sz]e|patch|rewrite)/.test(t)) return 0.5;
-  if (/(explain|help|how|why|what|guide|doc)/.test(t)) return 0.6;
   if (/(story|poem|joke|roast|rap|creative|meme)/.test(t)) return 0.95;
   if (isRandomTrigger) return 1.0;
-  if (hasAttachments) return 0.55;
-  return 0.75;
+
+  const complexity = computeMessageComplexityScore(messageText);
+  const hasTechnicalIntent = /(bug|error|stack|fix|debug|refactor|optimi[sz]e|patch|rewrite)/.test(t);
+  const hasExplainIntent = /(explain|help|how|why|what|guide|doc)/.test(t);
+
+  let temperature = complexity >= 0.6
+    ? 0.86
+    : complexity >= 0.25
+      ? 0.68
+      : 0.5;
+
+  // Keep help/explain prompts in a stable middle band (except explicit technical fixes).
+  if (hasExplainIntent && !hasTechnicalIntent && complexity < 0.6) {
+    temperature = clampNumber(Math.max(temperature, 0.62), 0.62, 0.72);
+  }
+
+  // Keep deterministic behavior for short/medium technical fix asks.
+  if (hasTechnicalIntent && complexity < 0.6) {
+    temperature = Math.min(temperature, 0.58);
+  }
+
+  if (hasAttachments) {
+    temperature = Math.min(temperature, 0.78);
+  }
+
+  return temperature;
 }
 
 module.exports = {

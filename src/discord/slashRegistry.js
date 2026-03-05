@@ -39,6 +39,18 @@ function buildSlashCommands() {
     .setDMPermission(false)
     .setDescription('Changes the bot prefix for this server.')
     .addStringOption((opt) => opt.setName('prefix').setDescription('New prefix, e.g. s.').setRequired(true));
+  const setRandomTriggerCommand = new SlashCommandBuilder()
+    .setName('setrandomtrigger')
+    .setDMPermission(false)
+    .setDescription('Set/view random AI trigger chance for this server (mods only).')
+    .addNumberOption((opt) =>
+      opt
+        .setName('percent')
+        .setDescription('Trigger chance in %, 0-100 (omit for status)')
+        .setMinValue(0)
+        .setMaxValue(100)
+        .setRequired(false)
+    );
   const setLogChannelCommand = new SlashCommandBuilder()
     .setName('setlogchannel')
     .setDescription('Set log channel for mod actions (mods only).')
@@ -147,6 +159,7 @@ function buildSlashCommands() {
     lsInfoCommand,
     setBanChannelCommand,
     setPrefixCommand,
+    setRandomTriggerCommand,
     setLogChannelCommand,
     attachmentsCommand,
     sayCommand,

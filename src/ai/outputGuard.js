@@ -49,11 +49,33 @@ function stripLeakedPromptLines(text) {
     if (lower.startsWith('owner:')) continue;
     if (lower.startsWith('system:') || lower.startsWith('assistant:') || lower.startsWith('analysis:')) continue;
     if (lower.startsWith('user ') && (lower.includes(' said:') || lower.includes(' replied:'))) continue;
+    if (looksLikeMemberFactsLeakLine(trimmed)) continue;
 
     filtered.push(trimmed);
   }
 
   return filtered.join('\n').trim();
+}
+
+function looksLikeMemberFactsLeakLine(line) {
+  const text = String(line || '').trim();
+  if (!text) return false;
+
+  const hasIdAndTag = /\(id\s+\d{15,22}\)/i.test(text) && /\|\s*tag\s+[^\n|]+/i.test(text);
+  const hasRolePerms = /:\s*roles?\s+/i.test(text) && /\bperms?\b/i.test(text);
+  const permMatches = text.match(/\b(?:admin|manage guild|manage messages|ban|kick|timeout)\b/gi) || [];
+  const hasModPermSummary =
+    /\bperms?\b/i.test(text) &&
+    /\b(?:yes|no)\b/i.test(text) &&
+    permMatches.length >= 3;
+
+  return hasIdAndTag || hasRolePerms || hasModPermSummary;
+}
+
+function looksLikeMemberFactsLeak(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  if (lines.length === 0) return false;
+  return lines.some((line) => looksLikeMemberFactsLeakLine(line));
 }
 
 function looksLikePromptLeak(text) {
@@ -118,6 +140,7 @@ function analyzeAiOutput(text) {
   const cleaned = stripOutputControlChars(stripZeroWidth(String(text || '')));
   const promptLeak = looksLikePromptLeak(cleaned);
   const reasoningLeak = looksLikeReasoningLeak(cleaned);
+  const memberFactsLeak = looksLikeMemberFactsLeak(cleaned);
   const gibberish = looksLikeGibberish(cleaned);
   const stripped = stripLeakedPromptLines(cleaned);
   const emptyAfterStrip = !stripped;
@@ -125,13 +148,14 @@ function analyzeAiOutput(text) {
   const reasons = [];
   if (promptLeak) reasons.push('prompt-leak');
   if (reasoningLeak) reasons.push('reasoning');
+  if (memberFactsLeak) reasons.push('member-facts-leak');
   if (gibberish) reasons.push('gibberish');
   if (emptyAfterStrip) reasons.push('empty');
 
   return {
     cleaned,
     stripped,
-    flags: { promptLeak, reasoningLeak, gibberish, emptyAfterStrip },
+    flags: { promptLeak, reasoningLeak, memberFactsLeak, gibberish, emptyAfterStrip },
     reasons,
   };
 }
@@ -143,9 +167,19 @@ function sanitizeAiOutput(text, { maxLen = 800 } = {}) {
 
   if (!out) return { text: '', analysis };
 
-  const looksBad = analysis.flags.promptLeak || analysis.flags.reasoningLeak || analysis.flags.gibberish;
+  const looksBad =
+    analysis.flags.promptLeak ||
+    analysis.flags.reasoningLeak ||
+    analysis.flags.memberFactsLeak ||
+    analysis.flags.gibberish;
 
-  if (looksBad || looksLikePromptLeak(out) || looksLikeReasoningLeak(out) || looksLikeGibberish(out)) {
+  if (
+    looksBad ||
+    looksLikePromptLeak(out) ||
+    looksLikeReasoningLeak(out) ||
+    looksLikeMemberFactsLeak(out) ||
+    looksLikeGibberish(out)
+  ) {
     return { text: '', analysis };
   }
 
@@ -203,6 +237,7 @@ module.exports = {
   stripLeakedPromptLines,
   looksLikePromptLeak,
   looksLikeReasoningLeak,
+  looksLikeMemberFactsLeak,
   looksLikeGibberish,
   analyzeAiOutput,
   sanitizeAiOutput,

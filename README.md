@@ -115,8 +115,9 @@ Makes the bot send a message in the current channel.
 Changes the prefix for the current server.
 
 ## Notes
-- AI chatbot uses **Hugging Face Inference Providers (Router)**. Configure `HUGGINGFACE_API_KEY` in `config.json`.
-- You can switch chat routing/provider presets (creator-only) with: `s.sethfprovider <novita|together|fastest|preferred|cheapest|groq|fireworks|nscale|hf-inference>`.
+- AI chatbot uses **Groq API**. Configure `GROQ_API_KEY` in `config.json` or save keys via `s.addgq <key>`.
+- Creator Groq commands: `s.addgq`, `s.rmgq`, `s.lsgq`, `s.setgq <modelId>`.
+- Creator utility commands renamed: `s.setglog <#channel|channelId|off>` and `s.wl <add|remove|list> <@user|id?>`.
 - Creator-only raw AI mode toggle: `s.q <on|off|toggle|status>` (turns off personality/sanitization shaping).
 - AI chat is rate-limited per user (config keys: `AI_RATE_LIMIT_PER_MINUTE`, `AI_RATE_LIMIT_PING_ONLY_PER_MINUTE`).
 - Reply detection for AI uses message tracking + fetch fallback (config: `AI_REPLY_TRACKER_MAX_IDS`, `AI_REPLY_TRACKER_TTL_MS`).
