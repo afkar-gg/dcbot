@@ -181,20 +181,22 @@ async function pingCreatorInGlobalLog(client, config, { guild, text } = {}) {
   }
 }
 
-async function notifyCreatorLowCredits(client, { guild, keyMasked } = {}) {
+async function notifyCreatorLowCredits(client, { guild, keyMasked, dmOnly = false } = {}) {
   try {
     const targetGuildId = CREATOR_ALERT_GUILD_ID || guild?.id || '';
     let channel = null;
 
-    if (targetGuildId) {
-      const alertGuild = await client.guilds.fetch(targetGuildId).catch(() => null);
-      if (alertGuild) {
-        channel = await alertGuild.channels.fetch(CREATOR_ALERT_CHANNEL_ID).catch(() => null);
+    if (!dmOnly) {
+      if (targetGuildId) {
+        const alertGuild = await client.guilds.fetch(targetGuildId).catch(() => null);
+        if (alertGuild) {
+          channel = await alertGuild.channels.fetch(CREATOR_ALERT_CHANNEL_ID).catch(() => null);
+        }
       }
-    }
 
-    if (!channel) {
-      channel = await client.channels.fetch(CREATOR_ALERT_CHANNEL_ID).catch(() => null);
+      if (!channel) {
+        channel = await client.channels.fetch(CREATOR_ALERT_CHANNEL_ID).catch(() => null);
+      }
     }
 
     const where = guild?.name ? `in ${guild.name}` : '';
@@ -276,6 +278,13 @@ function isGroqRateLimitError(err) {
   return Number(err?.status) === 429;
 }
 
+function parseListIndex(value) {
+  const raw = String(value || '').trim();
+  if (!/^[1-9]\d*$/.test(raw)) return 0;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
+}
+
 function parseRetryAfterMsFromText(text = '') {
   const raw = String(text || '');
   if (!raw) return 0;
@@ -324,12 +333,24 @@ function isGroqCreditDepletedError(err) {
   );
 }
 
+function isGroqOrganizationRestrictedError(err) {
+  const status = Number(err?.status);
+  if (status !== 400) return false;
+  const body = String(err?.body || err?.message || '').toLowerCase();
+  return (
+    body.includes('organization has been restricted') ||
+    body.includes('organization_restricted') ||
+    body.includes('"code":"organization_restricted"')
+  );
+}
+
 // Track in-flight AI responses so we can nudge the user if the model/provider is slow.
 // Keyed by triggering message id.
 const aiInFlight = new Map();
 const groqDepletedCounts = new Map();
 const groqDepletedGlobalPinged = new Set();
 const groqDepletedCreatorNotified = new Set();
+const groqRestrictedCreatorNotified = new Set();
 
 // Per-user rolling window rate limit for AI triggers (mention/reply/random).
 // Map<userId, number[]> where array holds timestamps (ms) within last minute.
@@ -367,10 +388,10 @@ function buildHelpText(prefix, { includeAll = false } = {}) {
     lines.push('**Creator/Whitelist**');
     lines.push(`• \`${prefix}q <on|off|toggle|status>\` - Toggle raw AI mode (no personality/sanitize shaping)`);
     lines.push(`• \`${prefix}addgq <key>\` - Save a Groq API key to the managed key pool`);
-    lines.push(`• \`${prefix}rmgq <key|masked>\` - Remove a saved Groq API key`);
-    lines.push(`• \`${prefix}lsgq\` - List saved Groq keys, usage stats, and key availability`);
+    lines.push(`• \`${prefix}rmgq <number|key|masked>\` - Remove a saved Groq API key`);
+    lines.push(`• \`${prefix}lsgq [un]\` - List saved Groq keys (add \`un\` to DM unmasked keys)`);
     lines.push(`• \`${prefix}lsgqmodel\` - List available Groq models`);
-    lines.push(`• \`${prefix}setgq <modelId>\` - Set the active Groq chat model`);
+    lines.push(`• \`${prefix}setgq <number|modelId>\` - Set the active Groq chat model`);
     lines.push(`• \`${prefix}servers [noinvites]\` - DM server inventory (optionally without invites)`);
     lines.push(`• \`${prefix}setglog <#channel|channelId|off>\` - Set or disable the global low-credit log channel`);
     lines.push(`• \`${prefix}wl <add|remove|list> <@user|id?>\` - Manage creator whitelist access`);
@@ -2190,6 +2211,7 @@ function createBot({ loadstringStore } = {}) {
 
   let groqUsageSaveTimer = null;
   let groqUsageDirty = false;
+  const groqUnmanagedRateLimit = new Map();
 
   function ensureGroqUsageStore() {
     if (!config.groqKeyUsage || typeof config.groqKeyUsage !== 'object' || Array.isArray(config.groqKeyUsage)) {
@@ -2252,6 +2274,53 @@ function createBot({ loadstringStore } = {}) {
     groqUsageSaveTimer.unref?.();
   }
 
+  function dropGroqManagedKey(keyRaw = '') {
+    const key = String(keyRaw || '').trim();
+    if (!key) return { removed: false, remaining: 0 };
+    const keys = Array.isArray(config.groqApiKeys) ? config.groqApiKeys : [];
+    if (!keys.includes(key)) {
+      return { removed: false, remaining: keys.length, masked: maskApiKey(key) };
+    }
+
+    config.groqApiKeys = keys.filter((k) => k !== key);
+    const usageStore = ensureGroqUsageStore();
+    delete usageStore[key];
+
+    groqDepletedCounts.delete(key);
+    groqDepletedGlobalPinged.delete(key);
+    groqDepletedCreatorNotified.delete(key);
+    groqRestrictedCreatorNotified.delete(key);
+    groqUnmanagedRateLimit.delete(key);
+    saveConfig(config);
+
+    return {
+      removed: true,
+      remaining: config.groqApiKeys.length,
+      masked: maskApiKey(key),
+    };
+  }
+
+  async function handleGroqRestrictedKey({ keyRaw = '', guild, context = 'ai-chat' } = {}) {
+    const key = String(keyRaw || '').trim();
+    if (!key) return;
+    const masked = maskApiKey(key);
+    const dropped = dropGroqManagedKey(key);
+    if (dropped.removed) {
+      console.error(`Removed restricted Groq key ${masked} (${context})`);
+    }
+    if (groqRestrictedCreatorNotified.has(key)) return;
+    const notified = await notifyCreatorLowCredits(client, {
+      guild,
+      keyMasked: masked,
+      dmOnly: true,
+    });
+    if (notified) {
+      groqRestrictedCreatorNotified.add(key);
+    } else {
+      console.error(`Restricted-key DM alert not delivered for Groq key ${masked}; will retry.`);
+    }
+  }
+
   function markGroqInferenceUsage(keyRaw = '', { kind = 'chat', ok = true, error = '' } = {}) {
     const key = String(keyRaw || '').trim();
     if (!isManagedGroqKey(key)) return;
@@ -2287,13 +2356,15 @@ function createBot({ loadstringStore } = {}) {
 
   function markGroqKeyRateLimited(keyRaw = '', err) {
     const key = String(keyRaw || '').trim();
-    if (!isManagedGroqKey(key)) return;
-    const record = ensureGroqUsageRecord(key);
-    if (!record) return;
-
     const now = Date.now();
     const retryAfterMs = Math.max(resolveGroqRetryAfterMs(err), GROQ_RATE_LIMIT_FALLBACK_MS);
     const blockedUntilAt = now + retryAfterMs;
+    if (!isManagedGroqKey(key)) {
+      groqUnmanagedRateLimit.set(key, { blockedUntilAt, retryAfterMs, last429At: now });
+      return;
+    }
+    const record = ensureGroqUsageRecord(key);
+    if (!record) return;
     record.last429At = now;
     record.lastRetryAfterMs = retryAfterMs;
     record.blockedUntilAt = blockedUntilAt;
@@ -2303,10 +2374,16 @@ function createBot({ loadstringStore } = {}) {
 
   function clearGroqKeyRateLimitIfExpired(keyRaw = '') {
     const key = String(keyRaw || '').trim();
-    if (!isManagedGroqKey(key)) return;
+    const now = Date.now();
+    if (!isManagedGroqKey(key)) {
+      const unmanaged = groqUnmanagedRateLimit.get(key);
+      if (unmanaged?.blockedUntilAt && unmanaged.blockedUntilAt <= now) {
+        groqUnmanagedRateLimit.delete(key);
+      }
+      return;
+    }
     const record = ensureGroqUsageRecord(key);
     if (!record) return;
-    const now = Date.now();
     if (record.blockedUntilAt && record.blockedUntilAt <= now) {
       record.blockedUntilAt = 0;
       record.lastRetryAfterMs = 0;
@@ -2317,7 +2394,11 @@ function createBot({ loadstringStore } = {}) {
 
   function isGroqKeyAvailableNow(keyRaw = '', now = Date.now()) {
     const key = String(keyRaw || '').trim();
-    if (!isManagedGroqKey(key)) return true;
+    if (!isManagedGroqKey(key)) {
+      const unmanaged = groqUnmanagedRateLimit.get(key);
+      if (!unmanaged?.blockedUntilAt) return true;
+      return unmanaged.blockedUntilAt <= now;
+    }
     const stats = readGroqUsageStats(key);
     if (!stats.blockedUntilAt) return true;
     return stats.blockedUntilAt <= now;
@@ -2331,9 +2412,10 @@ function createBot({ loadstringStore } = {}) {
       const k = String(key || '').trim();
       if (!k) continue;
       clearGroqKeyRateLimitIfExpired(k);
-      const stats = readGroqUsageStats(k);
-      const blockedUntilAt = Number(stats.blockedUntilAt) || 0;
-      if (!isManagedGroqKey(k) || !blockedUntilAt || blockedUntilAt <= now) {
+      const blockedUntilAt = isManagedGroqKey(k)
+        ? Number(readGroqUsageStats(k).blockedUntilAt) || 0
+        : Number(groqUnmanagedRateLimit.get(k)?.blockedUntilAt) || 0;
+      if (!blockedUntilAt || isGroqKeyAvailableNow(k, now)) {
         available.push(k);
       } else {
         cooling.push({ key: k, blockedUntilAt });
@@ -2505,6 +2587,9 @@ function createBot({ loadstringStore } = {}) {
       } catch (e) {
         if (isGroqRateLimitError(e)) {
           markGroqKeyRateLimited(key, e);
+        } else if (isGroqOrganizationRestrictedError(e)) {
+          // eslint-disable-next-line no-await-in-loop
+          await handleGroqRestrictedKey({ keyRaw: key, context: 'lsgqmodel' });
         }
         lastErr = e;
       }
@@ -3658,6 +3743,23 @@ function applyGroqProvider(modelId) {
           markGroqInferenceUsage(key, { kind: 'imageOcr', ok: true });
           clearGroqKeyRateLimitIfExpired(key);
         }
+        const restrictedErr = (
+          captionResult.status === 'rejected' && isGroqOrganizationRestrictedError(captionResult.reason)
+        )
+          ? captionResult.reason
+          : (
+            ocrResult.status === 'rejected' && isGroqOrganizationRestrictedError(ocrResult.reason)
+          )
+            ? ocrResult.reason
+            : null;
+        if (restrictedErr) {
+          await handleGroqRestrictedKey({
+            keyRaw: key,
+            guild: message.guild,
+            context: 'ai-media',
+          });
+          continue;
+        }
         if (caption || ocrText) {
           return {
             caption: stripOutputControlChars(caption || ''),
@@ -4099,6 +4201,15 @@ function applyGroqProvider(modelId) {
             retryAfterMs: Number(e?.retryAfterMs || 0),
           });
 
+          if (isGroqOrganizationRestrictedError(e)) {
+            await handleGroqRestrictedKey({
+              keyRaw: key,
+              guild: message.guild,
+              context: 'ai-chat',
+            });
+            continue;
+          }
+
           if (isGroqCreditDepletedError(e)) {
             const nextCount = (groqDepletedCounts.get(key) || 0) + 1;
             groqDepletedCounts.set(key, nextCount);
@@ -4132,13 +4243,13 @@ function applyGroqProvider(modelId) {
             // After repeated failures, remove depleted managed keys from the pool.
             if (nextCount >= 3) {
               if (groqKeys.length > 0) {
-                const before = (config.groqApiKeys || []).length;
-                config.groqApiKeys = (config.groqApiKeys || []).filter((k) => k !== key);
-                saveConfig(config);
-                groqDepletedCounts.delete(key);
-                console.error(
-                  `Removed depleted Groq key ${masked} after ${nextCount} errors (${before} -> ${config.groqApiKeys.length})`
-                );
+                const dropped = dropGroqManagedKey(key);
+                if (dropped.removed) {
+                  groqDepletedCounts.delete(key);
+                  console.error(
+                    `Removed depleted Groq key ${masked} after ${nextCount} errors (${dropped.remaining} keys remain)`
+                  );
+                }
               }
             }
 
@@ -5046,6 +5157,7 @@ function applyGroqProvider(modelId) {
       if (!keys.includes(key)) keys.push(key);
       config.groqApiKeys = keys;
       ensureGroqUsageRecord(key);
+      groqRestrictedCreatorNotified.delete(key);
       saveConfig(config);
 
       await safeReply(message, {
@@ -5067,32 +5179,28 @@ function applyGroqProvider(modelId) {
       const token = String(args[0] || '').trim();
       if (!token) {
         await safeReply(message, {
-          content: `usage: \`${prefix}rmgq <key|masked>\``,
+          content: `usage: \`${prefix}rmgq <number|key|masked>\``,
           allowedMentions: allowedMentionsSafe(),
         });
         return;
       }
 
       const keys = Array.isArray(config.groqApiKeys) ? config.groqApiKeys : [];
-      const match = keys.find((k) => k === token) || keys.find((k) => maskApiKey(k) === token);
+      const index = parseListIndex(token);
+      const matchFromIndex = index > 0 ? keys[index - 1] : '';
+      const match = matchFromIndex || keys.find((k) => k === token) || keys.find((k) => maskApiKey(k) === token);
       if (!match) {
         await safeReply(message, {
-          content: 'key not found',
+          content: index > 0 ? 'key number out of range' : 'key not found',
           allowedMentions: allowedMentionsSafe(),
         });
         return;
       }
 
-      config.groqApiKeys = keys.filter((k) => k !== match);
-      const usageStore = ensureGroqUsageStore();
-      delete usageStore[match];
-      groqDepletedCounts.delete(match);
-      groqDepletedGlobalPinged.delete(match);
-      groqDepletedCreatorNotified.delete(match);
-      saveConfig(config);
+      const removed = dropGroqManagedKey(match);
 
       await safeReply(message, {
-        content: `removed groq key ${maskApiKey(match)} (total ${config.groqApiKeys.length})`,
+        content: `removed groq key ${maskApiKey(match)} (total ${removed.remaining})`,
         allowedMentions: allowedMentionsSafe(),
       });
       return;
@@ -5108,6 +5216,40 @@ function applyGroqProvider(modelId) {
       }
 
       const keys = Array.isArray(config.groqApiKeys) ? config.groqApiKeys : [];
+      const wantsUnmasked = String(args[0] || '').trim().toLowerCase() === 'un';
+      if (wantsUnmasked) {
+        if (!keys.length) {
+          await safeReply(message, {
+            content: 'no groq keys saved',
+            allowedMentions: allowedMentionsSafe(),
+          });
+          return;
+        }
+
+        const lines = [
+          `groq keys (unmasked) | total: ${keys.length}`,
+          '',
+          ...keys.map((k, i) => `${i + 1}. ${k}`),
+        ];
+        const chunks = chunkLines(lines, 1750);
+        try {
+          for (const chunk of chunks) {
+            // eslint-disable-next-line no-await-in-loop
+            await message.author.send({ content: chunk });
+          }
+          await safeReply(message, {
+            content: 'sent unmasked keys to your dms',
+            allowedMentions: allowedMentionsSafe(),
+          });
+        } catch (e) {
+          await safeReply(message, {
+            content: 'could not dm you the unmasked keys (enable dms and try again)',
+            allowedMentions: allowedMentionsSafe(),
+          });
+        }
+        return;
+      }
+
       const entries = keys.map((k) => {
         clearGroqKeyRateLimitIfExpired(k);
         const stats = readGroqUsageStats(k);
@@ -5192,18 +5334,24 @@ function applyGroqProvider(modelId) {
       if (!modelInput) {
         const current = resolveGroqChatModel();
         await safeReply(message, {
-          content: `usage: \`${prefix}setgq <modelId>\`\ncurrent: ${current}`,
+          content: `usage: \`${prefix}setgq <number|modelId>\`\ncurrent: ${current}`,
           allowedMentions: allowedMentionsSafe(),
         });
         return;
       }
 
       const modelState = await fetchAvailableGroqModels({ forceRefresh: true });
-      const match = modelState.models.find((m) => m.toLowerCase() === modelInput.toLowerCase());
+      const modelIndex = parseListIndex(modelInput);
+      const matchByIndex = modelIndex > 0 ? modelState.models[modelIndex - 1] : '';
+      const match = matchByIndex || modelState.models.find((m) => m.toLowerCase() === modelInput.toLowerCase());
       if (!match) {
         await safeReply(message, {
           content: modelState.models.length
-            ? `invalid model. run \`${prefix}lsgqmodel\` to see available models`
+            ? (
+              modelIndex > 0
+                ? `invalid model number. run \`${prefix}lsgqmodel\` to see available models`
+                : `invalid model. run \`${prefix}lsgqmodel\` to see available models`
+            )
             : 'could not fetch Groq model list. add a valid Groq key and try again',
           allowedMentions: allowedMentionsSafe(),
         });
@@ -6580,6 +6728,7 @@ function applyGroqProvider(modelId) {
     keys.push(key);
     config.groqApiKeys = keys;
     ensureGroqUsageRecord(key);
+    groqRestrictedCreatorNotified.delete(key);
     saveConfig(config);
 
     return { ok: true, added: true, masked: maskApiKey(key), total: keys.length };
