@@ -4302,6 +4302,8 @@ function applyGroqProvider(modelId) {
       aiText = String(aiText || '').trim();
     }
 
+    // Language retry: only for non-Latin script languages (Arabic, Russian, Japanese, Korean, Chinese)
+    // when AI incorrectly responds in English. For Latin-script languages, trust the AI's judgment.
     if (shouldRetryForLocaleMismatch({
       expectedLocale: preferredReplyLocale,
       userText: rawPrompt || message.content || '',
@@ -4399,6 +4401,8 @@ function applyGroqProvider(modelId) {
           ? [...sanitized.analysis.reasons]
           : ['unknown'];
         let retryErr = null;
+        
+        // First retry with strict system prompt
         try {
           const strictSystem = buildStrictSystemPrompt(systemText, sanitizedReasons);
           const retryText = await callAiOnce({
@@ -4410,6 +4414,25 @@ function applyGroqProvider(modelId) {
           aiText = sanitized.text;
         } catch (e) {
           retryErr = e;
+        }
+
+        // Second retry if first retry still failed - with even stricter instructions
+        if (!aiText) {
+          try {
+            const stricterSystem = buildStrictSystemPrompt(
+              systemText,
+              [...sanitizedReasons, 'repeated-violation']
+            );
+            const retryText2 = await callAiOnce({
+              system: stricterSystem,
+              temperature: Math.min(temperature, 0.4),
+              maxTokens: isLightChat ? Math.min(maxTokens, 150) : maxTokens,
+            });
+            sanitized = sanitizeAiOutput(stripModelThinking(retryText2));
+            aiText = sanitized.text;
+          } catch (e) {
+            retryErr = e;
+          }
         }
 
         if (!aiText) {

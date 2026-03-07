@@ -1,22 +1,10 @@
+/**
+ * Language detection for reply context.
+ * Uses script-based detection only - relies on AI to naturally detect language.
+ */
+
 const SUPPORTED_LOCALES = new Set(['en', 'id', 'es', 'pt', 'fr', 'de', 'tr', 'ar', 'ru', 'ja', 'ko', 'zh']);
-
-const KEYWORD_MAP = {
-  id: ['aku', 'kamu', 'tolong', 'yang', 'nggak', 'enggak', 'gak', 'tidak', 'banget', 'dong', 'nih', 'itu', 'ini'],
-  es: ['hola', 'gracias', 'por', 'favor', 'puedes', 'como', 'esto', 'archivo', 'adjunto', 'ayuda', 'porque'],
-  pt: ['ola', 'obrigado', 'obrigada', 'por', 'favor', 'voce', 'como', 'isso', 'arquivo', 'anexo', 'ajuda'],
-  fr: ['bonjour', 'merci', 'sil', 'vous', 'plait', 'fichier', 'piece', 'jointe', 'peux', 'comment', 'pourquoi'],
-  de: ['hallo', 'danke', 'bitte', 'kannst', 'nicht', 'datei', 'anhang', 'wie', 'warum', 'hilfe'],
-  tr: ['merhaba', 'tesekkur', 'lutfen', 'yardim', 'nasil', 'degil', 'dosya', 'ek', 'neden'],
-};
-
-const PHRASE_HINTS = {
-  id: ['bahasa indonesia', 'pakai bahasa indonesia'],
-  es: ['en espanol', 'habla espanol'],
-  pt: ['em portugues', 'fala portugues'],
-  fr: ['en francais', 'parle francais'],
-  de: ['auf deutsch', 'sprich deutsch'],
-  tr: ['turkce konus', 'turkce yaz'],
-};
+const NON_LATIN_SCRIPT_LOCALES = ['ar', 'ru', 'ja', 'ko', 'zh'];
 
 const NOTICE_BY_KIND = {
   attachments_disabled: {
@@ -68,25 +56,10 @@ function detectScriptLocale(text) {
   return '';
 }
 
-function tokenizeLatin(text) {
-  return String(text || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\u00c0-\u024f]+/g, ' ')
-    .split(/\s+/)
-    .filter(Boolean);
-}
-
-function scoreKeywordHits(tokens, keywords) {
-  if (!Array.isArray(tokens) || tokens.length === 0) return 0;
-  const tokenSet = new Set(tokens);
-  let score = 0;
-  for (const word of keywords) {
-    if (!word) continue;
-    if (tokenSet.has(word)) score += 1;
-  }
-  return score;
-}
-
+/**
+ * Detect reply language based on script only.
+ * For Latin-script languages, return 'en' and let the AI handle it naturally.
+ */
 function detectReplyLanguage({ messageText = '', repliedText = '' } = {}) {
   const sourceText = `${String(messageText || '').trim()}\n${String(repliedText || '').trim()}`.trim();
   if (!sourceText) return 'en';
@@ -94,27 +67,7 @@ function detectReplyLanguage({ messageText = '', repliedText = '' } = {}) {
   const scriptLocale = detectScriptLocale(sourceText);
   if (scriptLocale) return scriptLocale;
 
-  const lower = sourceText.toLowerCase();
-  const tokens = tokenizeLatin(lower);
-  let bestLocale = 'en';
-  let bestScore = 0;
-
-  for (const [locale, phrases] of Object.entries(PHRASE_HINTS)) {
-    if ((phrases || []).some((phrase) => phrase && lower.includes(phrase))) {
-      return locale;
-    }
-  }
-
-  for (const [locale, keywords] of Object.entries(KEYWORD_MAP)) {
-    const score = scoreKeywordHits(tokens, keywords);
-    if (score > bestScore) {
-      bestScore = score;
-      bestLocale = locale;
-    }
-  }
-
-  if (bestScore >= 2) return bestLocale;
-  if (bestScore >= 1 && tokens.length <= 4) return bestLocale;
+  // For Latin-script languages, let the AI detect naturally
   return 'en';
 }
 
@@ -128,4 +81,5 @@ module.exports = {
   detectReplyLanguage,
   getLocalizedAttachmentNotice,
   normalizeLocale,
+  detectScriptLocale,
 };

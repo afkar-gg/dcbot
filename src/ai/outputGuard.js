@@ -61,7 +61,17 @@ function looksLikeMemberFactsLeakLine(line) {
   const text = String(line || '').trim();
   if (!text) return false;
 
+  // Pattern 1: Full member facts format with ID and tag
+  // e.g., "- username (id 123456789) | tag username#1234: roles ..."
   const hasIdAndTag = /\(id\s+\d{15,22}\)/i.test(text) && /\|\s*tag\s+[^\n|]+/i.test(text);
+  
+  // Pattern 2: Just the ID pattern (common leak format)
+  const hasIdPattern = /\(id\s+\d{15,22}\)/i.test(text);
+  
+  // Pattern 3: Just the tag pattern (common leak format)
+  const hasTagPattern = /\|\s*tag\s+\S+/.test(text);
+  
+  // Pattern 4: Role/permissions summary format
   const hasRolePerms = /:\s*roles?\s+/i.test(text) && /\bperms?\b/i.test(text);
   const permMatches = text.match(/\b(?:admin|manage guild|manage messages|ban|kick|timeout)\b/gi) || [];
   const hasModPermSummary =
@@ -69,7 +79,9 @@ function looksLikeMemberFactsLeakLine(line) {
     /\b(?:yes|no)\b/i.test(text) &&
     permMatches.length >= 3;
 
-  return hasIdAndTag || hasRolePerms || hasModPermSummary;
+  // Trigger if we have ID or tag pattern (either one is enough for a leak)
+  // OR if we have the role/permissions format
+  return hasIdAndTag || hasIdPattern || hasTagPattern || hasRolePerms || hasModPermSummary;
 }
 
 function looksLikeMemberFactsLeak(text) {

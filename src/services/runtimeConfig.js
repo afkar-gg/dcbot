@@ -63,7 +63,7 @@ module.exports = {
   GROQ_CHAT_MODEL: readString('GROQ_CHAT_MODEL', ''),
   GROQ_VISION_MODEL: readString('GROQ_VISION_MODEL', ''),
   AI_CALL_TIMEOUT_MS: readNumber('AI_CALL_TIMEOUT_MS', 25_000, { min: 1_000 }),
-  BOT_TIMEZONE: readString('BOT_TIMEZONE', 'UTC'),
+  BOT_TIMEZONE: readString('BOT_TIMEZONE', 'Asia/Jakarta'),
   BOT_TIME_LOCALE: readString('BOT_TIME_LOCALE', 'en-US'),
   LOADSTRING_MAX_BYTES: readNumber('LOADSTRING_MAX_BYTES', 250_000, { min: 1_000 }),
   LOADSTRING_MAX_PER_USER: readNumber('LOADSTRING_MAX_PER_USER', 15, { min: 1 }),

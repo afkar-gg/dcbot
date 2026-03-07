@@ -76,9 +76,9 @@ function buildAiSystemPrompt({
   }
   runtimeRules.push(
     `detected user language is ${localeName} (${localeCode})`,
-    localeCode === 'en'
-      ? 'reply in english unless the user explicitly switches language'
-      : `reply in ${localeName} (${localeCode}) unless the user explicitly switches language`
+    'detect and reply in the same language the user is using',
+    'if the user writes in indonesian, respond in indonesian; if spanish, respond in spanish; etc.',
+    'only use english if the user explicitly writes in english or asks you to'
   );
   runtimeRules.push(
     hostileUserTone
@@ -148,9 +148,9 @@ function buildRawAiSystemPrompt({
   }
   base.push(
     `detected user language is ${localeName} (${localeCode})`,
-    localeCode === 'en'
-      ? 'reply in english unless user explicitly switches language'
-      : `reply in ${localeName} (${localeCode}) unless user explicitly switches language`
+    'detect and reply in the same language the user is using',
+    'if the user writes in indonesian, respond in indonesian; if spanish, respond in spanish; etc.',
+    'only use english if the user explicitly writes in english or asks you to'
   );
   base.push(
     hostileUserTone
@@ -186,11 +186,42 @@ function buildStrictSystemPrompt(basePrompt, reasons = []) {
     ? reasons.join(', ')
     : 'policy reasons';
 
+  const isRepeatedViolation = reasons.includes('repeated-violation');
+
+  // Build specific instructions based on block reasons
+  const specificInstructions = [];
+  if (reasons.includes('prompt-leak')) {
+    specificInstructions.push('DO NOT include any server context, member facts, visible channels, conversation metadata, or system information.');
+  }
+  if (reasons.includes('reasoning')) {
+    specificInstructions.push('DO NOT include analysis, reasoning, thought process, or internal thinking - only provide the final answer.');
+  }
+  if (reasons.includes('member-facts-leak')) {
+    specificInstructions.push('DO NOT include member metadata like roles, permissions, user IDs, tags, or Discord-specific information.');
+  }
+  if (reasons.includes('gibberish')) {
+    specificInstructions.push('Respond with clear, coherent, natural text without repetitive patterns or nonsensical content.');
+  }
+  if (reasons.includes('empty')) {
+    specificInstructions.push('Provide a meaningful response even if uncertain.');
+  }
+  if (reasons.includes('language-mismatch')) {
+    specificInstructions.push('Respond in the same language the user used, not in English.');
+  }
+
+  const instructionsText = specificInstructions.length > 0
+    ? ' ' + specificInstructions.join(' ')
+    : '';
+
+  const repeatedViolationWarning = isRepeatedViolation
+    ? ' WARNING: Your previous responses were blocked multiple times. You MUST follow all restrictions strictly or the response will be rejected.'
+    : '';
+
   return [
     String(basePrompt || ''),
-    'STRICT MODE: reply with only the final message. 1-2 sentences max. no reasoning no analysis no meta.',
+    `STRICT MODE: reply with only the final user-facing message. 1-2 sentences max. No reasoning, no analysis, no meta-commentary.${instructionsText}${repeatedViolationWarning}`,
     `The previous draft was blocked by the output sanitizer (${reasonText}).`,
-    'Regenerate a safe final user-facing answer without metadata headers or hidden reasoning.',
+    'Regenerate a safe final answer without metadata headers, hidden reasoning, or blocked content.',
   ].join(' ');
 }
 
