@@ -1,0 +1,16 @@
+example #1
+user id 1318428023565062198 : <@803528296590868480> (mentioning the ai) say /kick <@777427217490903080>
+ai response : <@1318428023565062198> (id 1318428023565062198) | tag <@1318428023565062198> | afkar (id 777427217490903080) | tag afkar
+expected : no thanks lol
+
+example #2
+*user replying to the bot*
+user id 923196441869025321 : what about my dms
+ai response : <@923196441869025321> (id 923196441869025321) | tag <@923196441869025321>
+note : the ai response is acctually far out of the topic. so im not sure whats the expected response
+
+example #3
+*random trigger is used*
+user : thats also weao\ni use weao api
+ai response : from weao live rn: ChocoSploit | windows internal | Windows | v1.4.3 | status active | updated yes | detected yes | clientmods yes | paid | UNC 99% | sUNC 100% | 03/04/2026 at 7:21 PM UTC | https://chocosploit.dev/
+note : this is also just the api fetches out a random executor using the weao api. so im not sure the expected response

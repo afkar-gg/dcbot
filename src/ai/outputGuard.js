@@ -84,10 +84,26 @@ function looksLikeMemberFactsLeakLine(line) {
   return hasIdAndTag || hasIdPattern || hasTagPattern || hasRolePerms || hasModPermSummary;
 }
 
+function looksLikeRawExecutorTracker(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Detect pipe-separated executor format: "name | type | platform | v1.x | status..."
+    const pipeParts = trimmed.split('|').map(p => p.trim());
+    if (pipeParts.length >= 5) {
+      const hasVersion = pipeParts.some(p => /^v\d/i.test(p));
+      const hasStatus = pipeParts.some(p => /^status\s+(active|stale|discontinued)/i.test(p));
+      const hasPercent = pipeParts.some(p => /\d+\s*%/.test(p));
+      if (hasVersion && (hasStatus || hasPercent)) return true;
+    }
+  }
+  return false;
+}
+
 function looksLikeMemberFactsLeak(text) {
   const lines = String(text || '').split(/\r?\n/);
   if (lines.length === 0) return false;
-  return lines.some((line) => looksLikeMemberFactsLeakLine(line));
+  return lines.some((line) => looksLikeMemberFactsLeakLine(line) || looksLikeRawExecutorTracker(line));
 }
 
 function looksLikePromptLeak(text) {

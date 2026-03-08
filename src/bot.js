@@ -76,6 +76,7 @@ const {
   looksLikeReasoningLeak,
   sanitizeAiOutput,
   collapseRepetitiveLines,
+  looksLikeMemberFactsLeak,
 } = require('./ai/outputGuard');
 const { detectReplyLanguage, getLocalizedAttachmentNotice } = require('./ai/noticeI18n');
 const { shouldRetryForLocaleMismatch } = require('./ai/languageGuard');
@@ -1592,6 +1593,8 @@ function yesNo(value) {
   return value ? 'yes' : 'no';
 }
 
+// WARNING: This output contains internal metadata format.
+// ONLY use for AI prompt context. NEVER send directly to users.
 function formatMemberFactsLine(guild, targetId, target, member) {
   const userTag = stripControlChars(member.user?.tag || member.user?.username || '') || '';
   const userName = stripControlChars(member.user?.globalName || member.user?.username || '') || '';
@@ -1743,7 +1746,13 @@ function buildMemberFactsFallbackText(memberFactsBlock) {
       if (!raw) return '';
       if (/multiple members match|unable to resolve|unable to verify|unable to find/i.test(raw)) return raw;
       const identityOnly = raw.split(':')[0]?.trim() || '';
-      return identityOnly || raw;
+      
+      // Strip internal metadata (id 123) and | tag ...
+      return identityOnly
+        .replace(/\(id\s+\d+\)/gi, '')
+        .replace(/\|\s*tag\s+[^:\n]+/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
     })
     .filter(Boolean);
   if (lines.length === 0) return '';
@@ -1895,7 +1904,21 @@ function buildExecutorStatusFallbackText(executorTrackerBlock, executorTrackerEr
   const topLine = extractExecutorTrackerTopEntryLine(executorTrackerBlock);
   if (topLine) {
     const line = topLine.replace(/^\d+\.\s*/, '').trim();
-    return `from weao live rn: ${line}`.slice(0, 460);
+    // Parse the pipe-separated format: "Name | Type | Platform | Version | status Active | ..."
+    const parts = line.split('|').map(p => p.trim());
+    const name = parts[0] || 'Unknown';
+    // parts[1] is usually "windows internal" or similar type
+    const type = parts[1] || 'executor';
+    
+    const statusPart = parts.find(p => p.toLowerCase().startsWith('status')) || '';
+    const status = statusPart.split(/\s+/)[1] || 'unknown';
+    
+    const url = parts.find(p => p.startsWith('http')) || '';
+    
+    let response = `${name} is a ${type} with ${status} status`;
+    if (url) response += `. More info: ${url}`;
+    
+    return response.slice(0, 460);
   }
   return 'weao returned no live rows rn so i cant verify status yet';
 }
@@ -4544,6 +4567,11 @@ function applyGroqProvider(modelId) {
       aiText = neutralizeMentions(aiText, { allowUserIds: aiReplyMentionUserIds });
     }
     aiText = normalizeAiStyle(aiText);
+
+    if (looksLikeMemberFactsLeak(aiText)) {
+      console.warn('[ai-leak] Blocked member facts leak/executor dump in output');
+      aiText = 'i glitched lol say it again';
+    }
 
     // Reply to the user message
     const MAX_AI_LINES = 4;
