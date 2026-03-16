@@ -76,6 +76,7 @@ function buildAiSystemPrompt({
   }
   runtimeRules.push(
     `detected user language is ${localeName} (${localeCode})`,
+    `reply in ${localeName} (${localeCode}) unless the user explicitly switches language`,
     'detect and reply in the same language the user is using',
     'if the user writes in indonesian, respond in indonesian; if spanish, respond in spanish; etc.',
     'only use english if the user explicitly writes in english or asks you to'
@@ -148,6 +149,7 @@ function buildRawAiSystemPrompt({
   }
   base.push(
     `detected user language is ${localeName} (${localeCode})`,
+    `reply in ${localeName} (${localeCode}) unless the user explicitly switches language`,
     'detect and reply in the same language the user is using',
     'if the user writes in indonesian, respond in indonesian; if spanish, respond in spanish; etc.',
     'only use english if the user explicitly writes in english or asks you to'

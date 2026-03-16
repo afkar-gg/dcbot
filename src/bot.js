@@ -737,6 +737,43 @@ function getStickerFormatName(format) {
   }
 }
 
+function getStickerFormatExt(format) {
+  switch (format) {
+    case StickerFormatType.PNG:
+      return 'png';
+    case StickerFormatType.APNG:
+      return 'png';
+    case StickerFormatType.GIF:
+      return 'gif';
+    case StickerFormatType.Lottie:
+      return 'json';
+    default:
+      return '';
+  }
+}
+
+function getStickerContentType(format) {
+  switch (format) {
+    case StickerFormatType.GIF:
+      return 'image/gif';
+    case StickerFormatType.PNG:
+    case StickerFormatType.APNG:
+      return 'image/png';
+    default:
+      return '';
+  }
+}
+
+function resolveStickerUrl(sticker) {
+  const directUrl = String(sticker?.url || '').trim();
+  if (directUrl) return directUrl;
+
+  const id = String(sticker?.id || '').trim();
+  const ext = getStickerFormatExt(sticker?.format);
+  if (!id || !ext || ext === 'json') return '';
+  return `https://cdn.discordapp.com/stickers/${id}.${ext}`;
+}
+
 function extractCustomEmojiTokens(text) {
   const out = [];
   const seen = new Set();
@@ -794,7 +831,14 @@ function trimAttachmentTextForPrompt(text, limit) {
   return safe.trim();
 }
 
-async function buildAttachmentContext(message, { analyzeImage, includeFileAttachments = true } = {}) {
+async function buildAttachmentContext(
+  message,
+  {
+    analyzeImage,
+    includeFileAttachments = true,
+    allowStickerAnalysis = false,
+  } = {}
+) {
   const attachments = includeFileAttachments && message?.attachments ? [...message.attachments.values()] : [];
   const stickers = message?.stickers ? [...message.stickers.values()] : [];
   const customEmojiTokens = extractCustomEmojiTokens(message?.content || '');
@@ -889,6 +933,49 @@ async function buildAttachmentContext(message, { analyzeImage, includeFileAttach
     const stickerName = stripControlChars(sticker?.name || 'sticker') || 'sticker';
     const stickerId = String(sticker?.id || '');
     const format = getStickerFormatName(sticker?.format);
+
+    const canAnalyzeSticker =
+      allowStickerAnalysis &&
+      typeof analyzeImage === 'function' &&
+      [StickerFormatType.PNG, StickerFormatType.APNG, StickerFormatType.GIF].includes(sticker?.format);
+
+    if (canAnalyzeSticker) {
+      const url = resolveStickerUrl(sticker);
+      const ext = getStickerFormatExt(sticker?.format) || 'png';
+      const contentType = getStickerContentType(sticker?.format) || 'image/png';
+
+      if (url) {
+        let imageMeta = null;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          imageMeta = await analyzeImage({
+            url,
+            name: `${stickerName}.${ext}`,
+            contentType,
+            size: 0,
+          });
+        } catch (e) {
+          console.error(`[ai-media] sticker analysis crashed for ${stickerName}:`, summarizeErr(e));
+          imageMeta = null;
+        }
+
+        const caption = trimAttachmentTextForPrompt(imageMeta?.caption || '', 500);
+        const ocrText = trimAttachmentTextForPrompt(imageMeta?.ocrText || '', MAX_IMAGE_OCR_CHARS);
+        const bits = [];
+        if (caption) bits.push(`caption: ${caption}`);
+        if (ocrText) bits.push(`ocr: ${ocrText}`);
+
+        if (bits.length > 0) {
+          result.lines.push(
+            `[sticker image: ${stickerName}${stickerId ? ` | id ${stickerId}` : ''}${
+              format ? ` | format ${format}` : ''
+            } | ${bits.join(' | ')}]`
+          );
+          continue;
+        }
+      }
+    }
+
     result.lines.push(
       `[sticker: ${stickerName}${stickerId ? ` | id ${stickerId}` : ''}${format ? ` | format ${format}` : ''}]`
     );
@@ -3807,6 +3894,7 @@ function applyGroqProvider(modelId) {
       ? await buildAttachmentContext(message, {
         analyzeImage,
         includeFileAttachments: allowAttachments,
+        allowStickerAnalysis: allowAttachments,
       })
       : null;
     let aiReplyMentionUserIds = [];

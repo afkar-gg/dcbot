@@ -1,10 +1,11 @@
 /**
  * Language detection for reply context.
- * Uses script-based detection only - relies on AI to naturally detect language.
+ * Uses script + latin heuristics; falls back to English.
  */
 
+const { detectLanguageFromText, detectScriptLocale } = require('./languageDetect');
+
 const SUPPORTED_LOCALES = new Set(['en', 'id', 'es', 'pt', 'fr', 'de', 'tr', 'ar', 'ru', 'ja', 'ko', 'zh']);
-const NON_LATIN_SCRIPT_LOCALES = ['ar', 'ru', 'ja', 'ko', 'zh'];
 
 const NOTICE_BY_KIND = {
   attachments_disabled: {
@@ -45,29 +46,15 @@ function normalizeLocale(locale) {
   return 'en';
 }
 
-function detectScriptLocale(text) {
-  const raw = String(text || '');
-  if (!raw) return '';
-  if (/[\u0600-\u06FF]/.test(raw)) return 'ar';
-  if (/[\u0400-\u04FF]/.test(raw)) return 'ru';
-  if (/[\u3040-\u30FF]/.test(raw)) return 'ja';
-  if (/[\uAC00-\uD7AF]/.test(raw)) return 'ko';
-  if (/[\u4E00-\u9FFF]/.test(raw)) return 'zh';
-  return '';
-}
-
 /**
- * Detect reply language based on script only.
- * For Latin-script languages, return 'en' and let the AI handle it naturally.
+ * Detect reply language based on script + Latin heuristics.
+ * Falls back to English when uncertain.
  */
 function detectReplyLanguage({ messageText = '', repliedText = '' } = {}) {
   const sourceText = `${String(messageText || '').trim()}\n${String(repliedText || '').trim()}`.trim();
   if (!sourceText) return 'en';
-
-  const scriptLocale = detectScriptLocale(sourceText);
-  if (scriptLocale) return scriptLocale;
-
-  // For Latin-script languages, let the AI detect naturally
+  const locale = detectLanguageFromText(sourceText);
+  if (locale && SUPPORTED_LOCALES.has(locale)) return locale;
   return 'en';
 }
 

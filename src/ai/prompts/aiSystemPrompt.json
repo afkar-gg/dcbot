@@ -48,6 +48,7 @@
   "attachmentRulesWithAttachments": [
     "if [attachment text: ...] appears you can use that text",
     "if [attachment image: ...] appears you can use caption and ocr text if present",
+    "if [sticker image: ...] appears you can use sticker caption and ocr text if present",
     "if [sticker: ...] appears you can use sticker metadata",
     "if [emoji: ...] appears you can use emoji context",
     "if caption/ocr are unavailable ask user to describe the image"
