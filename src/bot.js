@@ -3660,10 +3660,12 @@ function applyGroqProvider(modelId) {
       .replaceAll(botMentionB, '')
       .trim();
     const prompt = rawPrompt || '[ping only no text]';
-    const preferredReplyLocale = detectReplyLanguage({
+    const detectedReplyLocale = detectReplyLanguage({
       messageText: rawPrompt || message.content || '',
       repliedText: context?.repliedText || '',
+      allowReplyFallback: true,
     });
+    const preferredReplyLocale = detectedReplyLocale || 'auto';
     const hostileUserTone = isHostileUserText(rawPrompt || message.content || '');
 
     const quickReply = getExactQuickReply(rawPrompt);

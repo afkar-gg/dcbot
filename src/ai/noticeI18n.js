@@ -1,11 +1,67 @@
 /**
  * Language detection for reply context.
- * Uses script + latin heuristics; falls back to English.
+ * Uses script + latin heuristics; returns empty string when uncertain.
  */
 
-const { detectLanguageFromText, detectScriptLocale } = require('./languageDetect');
-
 const SUPPORTED_LOCALES = new Set(['en', 'id', 'es', 'pt', 'fr', 'de', 'tr', 'ar', 'ru', 'ja', 'ko', 'zh']);
+
+const LATIN_LOCALE_RULES = [
+  {
+    locale: 'id',
+    stopwords: new Set([
+      'yang', 'dan', 'di', 'ke', 'dari', 'untuk', 'aku', 'kamu', 'dia', 'mereka',
+      'saya', 'kami', 'kita', 'ini', 'itu', 'gak', 'ga', 'nggak', 'tidak',
+      'udah', 'sudah', 'bisa', 'tolong', 'mohon', 'lagi', 'banget', 'aja', 'dong',
+      'nih', 'kok', 'gue', 'lu', 'nya', 'dengan', 'atau',
+    ]),
+    diacritics: null,
+  },
+  {
+    locale: 'es',
+    stopwords: new Set([
+      'que', 'de', 'no', 'a', 'la', 'el', 'y', 'en', 'los', 'las', 'por',
+      'para', 'con', 'una', 'como', 'pero', 'porque', 'hola', 'gracias', 'favor',
+      'porfavor', 'porfa', 'si',
+    ]),
+    diacritics: /[áéíóúñü]/gi,
+  },
+  {
+    locale: 'pt',
+    stopwords: new Set([
+      'que', 'de', 'nao', 'não', 'a', 'o', 'os', 'as', 'e', 'em', 'para', 'por',
+      'com', 'uma', 'como', 'mas', 'porque', 'ola', 'olá', 'obrigado', 'obrigada',
+      'porfavor', 'por favor', 'sim',
+    ]),
+    diacritics: /[áéíóúâêôãõç]/gi,
+  },
+  {
+    locale: 'fr',
+    stopwords: new Set([
+      'le', 'la', 'les', 'de', 'des', 'et', 'en', 'un', 'une', 'pour', 'avec',
+      'pas', 'que', 'bonjour', 'merci', 'je', 'tu', 'vous', 'nous', 'mais',
+      's', 'il', 'est', 'sur',
+    ]),
+    diacritics: /[àâçéèêëîïôûùüÿœ]/gi,
+  },
+  {
+    locale: 'de',
+    stopwords: new Set([
+      'der', 'die', 'das', 'und', 'ist', 'nicht', 'ein', 'eine', 'zu', 'mit',
+      'auf', 'für', 'danke', 'bitte', 'ich', 'du', 'sie', 'wir', 'ihr', 'aber',
+      'wie', 'was', 'wo',
+    ]),
+    diacritics: /[äöüß]/gi,
+  },
+  {
+    locale: 'tr',
+    stopwords: new Set([
+      've', 'bir', 'bu', 'icin', 'için', 'degil', 'değil', 'ben', 'sen', 'o',
+      'biz', 'siz', 'ama', 'neden', 'merhaba', 'tesekkur', 'teşekkür', 'lutfen',
+      'lütfen', 'mi', 'mı', 'mu', 'mü',
+    ]),
+    diacritics: /[çğıİöşü]/gi,
+  },
+];
 
 const NOTICE_BY_KIND = {
   attachments_disabled: {
@@ -46,16 +102,114 @@ function normalizeLocale(locale) {
   return 'en';
 }
 
+function detectScriptLocale(text) {
+  const raw = String(text || '');
+  if (!raw) return '';
+  if (/[\u0600-\u06FF]/.test(raw)) return 'ar';
+  if (/[\u0400-\u04FF]/.test(raw)) return 'ru';
+  if (/[\u3040-\u30FF]/.test(raw)) return 'ja';
+  if (/[\uAC00-\uD7AF]/.test(raw)) return 'ko';
+  if (/[\u4E00-\u9FFF]/.test(raw)) return 'zh';
+  return '';
+}
+
+function tokenizeLatinText(text) {
+  const raw = String(text || '').toLowerCase();
+  if (!raw) return [];
+  try {
+    return raw.replace(/[^\p{L}\p{N}]+/gu, ' ').split(/\s+/).filter(Boolean);
+  } catch {
+    return raw.replace(/[^a-z0-9]+/g, ' ').split(/\s+/).filter(Boolean);
+  }
+}
+
+function countStopwords(tokens, stopwords) {
+  let count = 0;
+  for (const token of tokens) {
+    if (stopwords.has(token)) count += 1;
+  }
+  return count;
+}
+
+function detectLatinLocale(text) {
+  const tokens = tokenizeLatinText(text);
+  if (tokens.length === 0) return '';
+
+  let best = {
+    locale: '',
+    score: 0,
+    hits: 0,
+    diacritics: 0,
+  };
+
+  for (const rule of LATIN_LOCALE_RULES) {
+    const hits = countStopwords(tokens, rule.stopwords);
+    let score = hits / Math.max(4, tokens.length);
+
+    let diacritics = 0;
+    if (rule.diacritics) {
+      const matches = String(text || '').match(rule.diacritics) || [];
+      diacritics = matches.length;
+      if (diacritics > 0) {
+        score += 0.25 + Math.min(0.15, diacritics * 0.05);
+      }
+    }
+
+    if (score > best.score) {
+      best = { locale: rule.locale, score, hits, diacritics };
+    }
+  }
+
+  if (!best.locale) return '';
+  const smallSample = tokens.length <= 4;
+  const strongHit = best.hits >= 2 || (best.hits >= 1 && smallSample) || best.diacritics > 0;
+  if (!strongHit || best.score < 0.2) return '';
+  return best.locale;
+}
+
+const INDONESIAN_SLANG_REGEX = /\b(?:wkwk\w*|awok\w*|aowk\w*|woilah|jirla|jir|bg|bang|omj)\b/i;
+
+function detectIndonesianSignal(text) {
+  const raw = String(text || '');
+  if (!raw) return false;
+  const tokens = tokenizeLatinText(raw);
+  const idRule = LATIN_LOCALE_RULES.find((rule) => rule.locale === 'id');
+  const hitCount = idRule ? countStopwords(tokens, idRule.stopwords) : 0;
+  if (hitCount >= 2) return true;
+  return INDONESIAN_SLANG_REGEX.test(raw);
+}
+
+function detectLocaleFromText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+
+  const scriptLocale = detectScriptLocale(raw);
+  if (scriptLocale) return scriptLocale;
+
+  const latinLocale = detectLatinLocale(raw);
+  if (latinLocale) return latinLocale;
+
+  return '';
+}
+
 /**
  * Detect reply language based on script + Latin heuristics.
- * Falls back to English when uncertain.
+ * Returns '' when uncertain.
  */
-function detectReplyLanguage({ messageText = '', repliedText = '' } = {}) {
-  const sourceText = `${String(messageText || '').trim()}\n${String(repliedText || '').trim()}`.trim();
-  if (!sourceText) return 'en';
-  const locale = detectLanguageFromText(sourceText);
+function detectReplyLanguage({ messageText = '', repliedText = '', allowReplyFallback = true } = {}) {
+  const messageRaw = String(messageText || '').trim();
+  const replyRaw = String(repliedText || '').trim();
+
+  const primary = messageRaw;
+  const fallback = allowReplyFallback && !messageRaw ? replyRaw : '';
+
+  const locale = detectLocaleFromText(primary || fallback);
   if (locale && SUPPORTED_LOCALES.has(locale)) return locale;
-  return 'en';
+
+  if (primary && detectIndonesianSignal(primary)) return 'id';
+  if (fallback && detectIndonesianSignal(fallback)) return 'id';
+
+  return '';
 }
 
 function getLocalizedAttachmentNotice(kind, locale = 'en') {

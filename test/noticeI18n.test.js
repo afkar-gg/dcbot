@@ -12,6 +12,14 @@ test('detects Indonesian from user text', () => {
   assert.equal(locale, 'id');
 });
 
+test('uses reply context to force Indonesian for slang', () => {
+  const locale = detectReplyLanguage({
+    messageText: 'jirla',
+    repliedText: 'ya gitu kok aneh banget',
+  });
+  assert.equal(locale, 'id');
+});
+
 test('detects Spanish from user text', () => {
   const locale = detectReplyLanguage({ messageText: 'por favor revisa este archivo adjunto' });
   assert.equal(locale, 'es');

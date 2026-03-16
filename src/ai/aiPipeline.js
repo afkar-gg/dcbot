@@ -19,6 +19,7 @@ const LOCALE_NAME_MAP = {
 function normalizeReplyLocale(locale) {
   const raw = String(locale || 'en').trim().toLowerCase();
   if (!raw) return 'en';
+  if (raw === 'auto' || raw === 'unknown') return 'auto';
   const base = raw.split(/[-_]/)[0];
   return LOCALE_NAME_MAP[base] ? base : 'en';
 }
@@ -74,9 +75,13 @@ function buildAiSystemPrompt({
       'if user asks for current date/time, use this runtime context exactly'
     );
   }
+  if (localeCode !== 'auto') {
+    runtimeRules.push(
+      `detected user language is ${localeName} (${localeCode})`,
+      `reply in ${localeName} (${localeCode}) unless the user explicitly switches language`
+    );
+  }
   runtimeRules.push(
-    `detected user language is ${localeName} (${localeCode})`,
-    `reply in ${localeName} (${localeCode}) unless the user explicitly switches language`,
     'detect and reply in the same language the user is using',
     'if the user writes in indonesian, respond in indonesian; if spanish, respond in spanish; etc.',
     'only use english if the user explicitly writes in english or asks you to'
@@ -147,9 +152,13 @@ function buildRawAiSystemPrompt({
       'if user asks date or time use this runtime context'
     );
   }
+  if (localeCode !== 'auto') {
+    base.push(
+      `detected user language is ${localeName} (${localeCode})`,
+      `reply in ${localeName} (${localeCode}) unless the user explicitly switches language`
+    );
+  }
   base.push(
-    `detected user language is ${localeName} (${localeCode})`,
-    `reply in ${localeName} (${localeCode}) unless the user explicitly switches language`,
     'detect and reply in the same language the user is using',
     'if the user writes in indonesian, respond in indonesian; if spanish, respond in spanish; etc.',
     'only use english if the user explicitly writes in english or asks you to'
@@ -230,7 +239,7 @@ function buildStrictSystemPrompt(basePrompt, reasons = []) {
 function buildLanguageLockSystemPrompt(basePrompt, locale = 'en') {
   const localeCode = normalizeReplyLocale(locale);
   const localeName = LOCALE_NAME_MAP[localeCode] || 'English';
-  if (localeCode === 'en') return String(basePrompt || '');
+  if (localeCode === 'en' || localeCode === 'auto') return String(basePrompt || '');
 
   return [
     String(basePrompt || ''),
