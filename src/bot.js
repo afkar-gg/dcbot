@@ -34,6 +34,7 @@ const { buildModLogEmbed, sendLogEmbed } = require('./services/logService');
 const { groqChatCompletion, groqImageCaption, groqImageOcr, listGroqModels } = require('./services/groqService');
 const { neutralizeMentions } = require('./utils/sanitize');
 const { createLoadstringStore } = require('./services/loadstringApiStore');
+const { peekGroqKey, removeGroqKeyById } = require('./services/groqKeyQueueService');
 const {
   LOADSTRING_PUBLIC_BASE_URL,
   LOADSTRING_MAX_PER_USER,
@@ -113,6 +114,7 @@ const {
   AI_THREAD_NEW_PARTICIPANT_SIGNAL,
   AI_FALLBACK_REPLY_TEXT,
   AI_FORCE_VISIBLE_REPLY,
+  GROQ_KEY_QUEUE_POLL_MS,
 } = require('./services/runtimeConfig');
 const {
   extractWebSearchQuery,
@@ -2371,6 +2373,35 @@ function createBot({ loadstringStore } = {}) {
     const current = readGroqUsageStats(key);
     store[key] = current;
     return store[key];
+  }
+
+  async function pollGroqKeyQueue({ reason = 'interval' } = {}) {
+    try {
+      const item = await peekGroqKey();
+      if (!item) return;
+      const key = String(item.key || '').trim();
+      if (!/^gsk_[a-zA-Z0-9_-]{16,}$/.test(key)) {
+        console.error(`[groq-queue] invalid key received (${reason})`);
+        await removeGroqKeyById(item.id);
+        return;
+      }
+
+      const keys = Array.isArray(config.groqApiKeys) ? config.groqApiKeys : [];
+      if (!keys.includes(key)) {
+        keys.push(key);
+        config.groqApiKeys = keys;
+        ensureGroqUsageRecord(key);
+        groqRestrictedCreatorNotified.delete(key);
+        saveConfig(config);
+        console.log(`[groq-queue] added groq key ${maskApiKey(key)} (total ${keys.length})`);
+      } else {
+        console.log(`[groq-queue] key already present ${maskApiKey(key)}; clearing queue item`);
+      }
+
+      await removeGroqKeyById(item.id);
+    } catch (err) {
+      console.error('[groq-queue] poll failed', err?.message || err);
+    }
   }
 
   function scheduleGroqUsageSave() {
@@ -4831,6 +4862,14 @@ function applyGroqProvider(modelId) {
         }
       }
     }, 60_000);
+
+    const groqQueuePollMs = Math.max(5000, Number(GROQ_KEY_QUEUE_POLL_MS) || 120_000);
+    setTimeout(() => {
+      pollGroqKeyQueue({ reason: 'startup' });
+    }, 2000);
+    setInterval(() => {
+      pollGroqKeyQueue({ reason: 'interval' });
+    }, groqQueuePollMs);
 
     // Keep reply-target tracker bounded.
     setInterval(() => {
