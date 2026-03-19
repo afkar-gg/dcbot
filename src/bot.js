@@ -33,8 +33,8 @@ const {
 const { buildModLogEmbed, sendLogEmbed } = require('./services/logService');
 const { groqChatCompletion, groqImageCaption, groqImageOcr, listGroqModels } = require('./services/groqService');
 const { neutralizeMentions } = require('./utils/sanitize');
-const { createLoadstringStore } = require('./services/loadstringApiStore');
-const { peekGroqKey, removeGroqKeyById } = require('./services/groqKeyQueueService');
+const { createLoadstringStore, checkLoadstringApiConnectivity, getLoadstringApiDebugInfo } = require('./services/loadstringApiStore');
+const { peekGroqKey, removeGroqKeyById, checkGroqQueueConnectivity, getGroqQueueDebugInfo } = require('./services/groqKeyQueueService');
 const {
   LOADSTRING_PUBLIC_BASE_URL,
   LOADSTRING_MAX_PER_USER,
@@ -347,6 +347,18 @@ function isGroqOrganizationRestrictedError(err) {
   );
 }
 
+function isGroqServiceUnavailableError(err) {
+  const status = Number(err?.status);
+  if (status !== 503) return false;
+  const body = String(err?.body || err?.message || '').toLowerCase();
+  // Exclude "over capacity" errors - these are temporary capacity issues, not service unavailability
+  if (body.includes('over capacity')) return false;
+  return (
+    body.includes('service unavailable') ||
+    body.includes('groqstatus.com')
+  );
+}
+
 // Track in-flight AI responses so we can nudge the user if the model/provider is slow.
 // Keyed by triggering message id.
 const aiInFlight = new Map();
@@ -394,7 +406,7 @@ function buildHelpText(prefix, { includeAll = false } = {}) {
     lines.push(`• \`${prefix}rmgq <number|key|masked>\` - Remove a saved Groq API key`);
     lines.push(`• \`${prefix}lsgq [un]\` - List saved Groq keys (add \`un\` to DM unmasked keys)`);
     lines.push(`• \`${prefix}lsgqmodel\` - List available Groq models`);
-    lines.push(`• \`${prefix}setgq <number|modelId>\` - Set the active Groq chat model`);
+    lines.push(`• \`${prefix}setgq <primary>[,<model2>,<model3>,...]\` - Set Groq chat model(s) with fallback`);
     lines.push(`• \`${prefix}servers [noinvites]\` - DM server inventory (optionally without invites)`);
     lines.push(`• \`${prefix}setglog <#channel|channelId|off>\` - Set or disable the global low-credit log channel`);
     lines.push(`• \`${prefix}wl <add|remove|list> <@user|id?>\` - Manage creator whitelist access`);
@@ -2400,7 +2412,30 @@ function createBot({ loadstringStore } = {}) {
 
       await removeGroqKeyById(item.id);
     } catch (err) {
-      console.error('[groq-queue] poll failed', err?.message || err);
+      console.error('[groq-queue] poll failed:', {
+        error: err?.message || err,
+        code: err?.code,
+        status: err?.status,
+        stack: err?.stack,
+        debugInfo: err?.debugInfo,
+      });
+
+      if (err?.debugInfo) {
+        console.error('[groq-queue] error details:', JSON.stringify(err.debugInfo, null, 2));
+
+        const { url, responseStatus, responseBody } = err.debugInfo;
+        if (url) console.error(`  - URL: ${url}`);
+        if (responseStatus) console.error(`  - HTTP Status: ${responseStatus}`);
+        if (responseBody) console.error(`  - Response: ${responseBody.slice(0, 300)}`);
+      }
+
+      if (err?.code === 'ECONNREFUSED') {
+        console.error('[groq-queue] The API server refused connection. Make sure the server is running.');
+      } else if (err?.code === 'ENOTFOUND') {
+        console.error('[groq-queue] The API server hostname was not found. Check GROQ_KEY_QUEUE_BASE_URL config.');
+      } else if (err?.name === 'AbortError' || err?.code === 'GROQ_KEY_QUEUE_TIMEOUT') {
+        console.error('[groq-queue] The request timed out. Check server performance or increase LOADSTRING_API_TIMEOUT_MS.');
+      }
     }
   }
 
@@ -2728,7 +2763,7 @@ function createBot({ loadstringStore } = {}) {
       } catch (e) {
         if (isGroqRateLimitError(e)) {
           markGroqKeyRateLimited(key, e);
-        } else if (isGroqOrganizationRestrictedError(e)) {
+        } else if (isGroqOrganizationRestrictedError(e) || isGroqServiceUnavailableError(e)) {
           // eslint-disable-next-line no-await-in-loop
           await handleGroqRestrictedKey({ keyRaw: key, context: 'lsgqmodel' });
         }
@@ -2746,6 +2781,20 @@ function createBot({ loadstringStore } = {}) {
   function resolveGroqChatModel() {
     const raw = normalizeGroqModelId(RUNTIME_GROQ_CHAT_MODEL || config.groqChatModel || DEFAULT_GROQ_MODEL);
     return raw || DEFAULT_GROQ_MODEL;
+  }
+
+  function resolveGroqChatModels() {
+    // Return array of models: primary first, then alternatives
+    // Supports both legacy single model (groqChatModel) and new multi-model (groqChatModels)
+    const runtimeModel = RUNTIME_GROQ_CHAT_MODEL;
+    if (runtimeModel) {
+      return [normalizeGroqModelId(runtimeModel)].filter(Boolean);
+    }
+    if (Array.isArray(config.groqChatModels) && config.groqChatModels.length > 0) {
+      return config.groqChatModels.map((m) => normalizeGroqModelId(m)).filter(Boolean);
+    }
+    const legacyModel = normalizeGroqModelId(config.groqChatModel || DEFAULT_GROQ_MODEL);
+    return legacyModel ? [legacyModel] : [DEFAULT_GROQ_MODEL];
   }
 
   const client = new Client({
@@ -2968,8 +3017,40 @@ function createBot({ loadstringStore } = {}) {
         return;
       }
 
+      console.error('[LOADSTRING_ERROR] Failed to save loadstring:', {
+        error: e?.message || e,
+        code: e?.code,
+        status: e?.status,
+        stack: e?.stack,
+        debugInfo: e?.debugInfo,
+      });
+
+      let errorMsg = `failed to save loadstring: ${e?.message || 'loadstring service unavailable'}`;
+      
+      if (e?.debugInfo) {
+        console.error('[LOADSTRING_DEBUG] Error details:', JSON.stringify(e.debugInfo, null, 2));
+        
+        if (e.debugInfo.url) {
+          errorMsg += `\n\nDebug info:\n- URL: \`${e.debugInfo.url}\``;
+        }
+        if (e.debugInfo.responseStatus) {
+          errorMsg += `\n- HTTP Status: ${e.debugInfo.responseStatus}`;
+        }
+        if (e.debugInfo.responseBody) {
+          errorMsg += `\n- Response: \`${e.debugInfo.responseBody.slice(0, 200)}\``;
+        }
+      }
+      
+      if (e?.code === 'ECONNREFUSED') {
+        errorMsg += '\n\nThe API server refused connection. Make sure the loadstring API server is running.';
+      } else if (e?.code === 'ENOTFOUND') {
+        errorMsg += '\n\nThe API server hostname was not found. Check your LOADSTRING_API_BASE_URL config.';
+      } else if (e?.name === 'AbortError' || e?.code === 'LOADSTRING_API_TIMEOUT') {
+        errorMsg += '\n\nThe API request timed out. Check your API server performance or increase LOADSTRING_API_TIMEOUT_MS.';
+      }
+
       await safeReply(message, {
-        content: `failed to save loadstring: ${e?.message || 'loadstring service unavailable'}`,
+        content: errorMsg,
         allowedMentions: allowedMentionsSafe(),
       });
       return;
@@ -3472,6 +3553,136 @@ function createBot({ loadstringStore } = {}) {
     });
   }
 
+  async function handleLoadstringDebugCommand(message) {
+    const isCreator = message.author.id === CREATOR_USER_ID;
+    if (!isCreator) {
+      await safeReply(message, {
+        content: 'This command is only available to the bot creator.',
+        allowedMentions: allowedMentionsSafe(),
+      });
+      return;
+    }
+
+    try {
+      const debugInfo = getLoadstringApiDebugInfo();
+      const connectivityResults = await checkLoadstringApiConnectivity();
+
+      let responseText = '**Loadstring API Debug Information**\n\n';
+      responseText += '**Configuration:**\n';
+      responseText += `- Base URL: \`${debugInfo.config.LOADSTRING_API_BASE_URL}\`\n`;
+      responseText += `- Token Configured: ${debugInfo.config.LOADSTRING_API_TOKEN_CONFIGURED}\n`;
+      responseText += `- Timeout: ${debugInfo.config.LOADSTRING_API_TIMEOUT_MS}ms\n`;
+      responseText += `- Debug Mode: ${debugInfo.config.DEBUG_ENABLED}\n\n`;
+
+      if (debugInfo.environment.DEBUG_LOADSTRING_API_ENV) {
+        responseText += `- DEBUG_LOADSTRING_API env: \`${debugInfo.environment.DEBUG_LOADSTRING_API_ENV}\`\n`;
+      }
+
+      responseText += '\n**Connectivity Check:**\n';
+      responseText += `- Overall Status: ${connectivityResults.ok ? '✅ OK' : '❌ FAILED'}\n`;
+
+      for (const [checkName, checkResult] of Object.entries(connectivityResults.checks)) {
+        const status = checkResult.ok ? '✅' : '❌';
+        responseText += `- ${checkName}: ${status}\n`;
+
+        if (checkResult.value) {
+          responseText += `  - Value: \`${checkResult.value}\`\n`;
+        }
+        if (checkResult.status !== undefined) {
+          responseText += `  - HTTP Status: ${checkResult.status}\n`;
+        }
+        if (checkResult.error) {
+          responseText += `  - Error: \`${checkResult.error}\`\n`;
+        }
+      }
+
+      if (connectivityResults.errors.length > 0) {
+        responseText += '\n**Errors:**\n';
+        for (const error of connectivityResults.errors) {
+          responseText += `- ${error}\n`;
+        }
+      }
+
+      responseText += '\n**Tip:** Enable debug logging by setting `DEBUG_LOADSTRING_API: true` in config.json or `DEBUG_LOADSTRING_API=true` environment variable.';
+
+      await safeReply(message, {
+        content: responseText,
+        allowedMentions: allowedMentionsSafe(),
+      });
+    } catch (err) {
+      console.error('[LOADSTRING_DEBUG] Error:', err);
+      await safeReply(message, {
+        content: `Debug check failed: ${err?.message || err}`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+    }
+  }
+
+  async function handleGroqQueueDebugCommand(message) {
+    const isCreator = message.author.id === CREATOR_USER_ID;
+    if (!isCreator) {
+      await safeReply(message, {
+        content: 'This command is only available to the bot creator.',
+        allowedMentions: allowedMentionsSafe(),
+      });
+      return;
+    }
+
+    try {
+      const debugInfo = getGroqQueueDebugInfo();
+      const connectivityResults = await checkGroqQueueConnectivity();
+
+      let responseText = '**Groq Queue API Debug Information**\n\n';
+      responseText += '**Configuration:**\n';
+      responseText += `- Base URL: \`${debugInfo.config.GROQ_KEY_QUEUE_BASE_URL}\`\n`;
+      responseText += `- Token Configured: ${debugInfo.config.GROQ_KEY_QUEUE_TOKEN_CONFIGURED}\n`;
+      responseText += `- Timeout: ${debugInfo.config.LOADSTRING_API_TIMEOUT_MS}ms\n`;
+      responseText += `- Debug Mode: ${debugInfo.config.DEBUG_ENABLED}\n\n`;
+
+      if (debugInfo.environment.DEBUG_GROQ_QUEUE_ENV) {
+        responseText += `- DEBUG_GROQ_QUEUE env: \`${debugInfo.environment.DEBUG_GROQ_QUEUE_ENV}\`\n`;
+      }
+
+      responseText += '\n**Connectivity Check:**\n';
+      responseText += `- Overall Status: ${connectivityResults.ok ? '✅ OK' : '❌ FAILED'}\n`;
+
+      for (const [checkName, checkResult] of Object.entries(connectivityResults.checks)) {
+        const status = checkResult.ok ? '✅' : '❌';
+        responseText += `- ${checkName}: ${status}\n`;
+
+        if (checkResult.value) {
+          responseText += `  - Value: \`${checkResult.value}\`\n`;
+        }
+        if (checkResult.status !== undefined) {
+          responseText += `  - HTTP Status: ${checkResult.status}\n`;
+        }
+        if (checkResult.error) {
+          responseText += `  - Error: \`${checkResult.error}\`\n`;
+        }
+      }
+
+      if (connectivityResults.errors.length > 0) {
+        responseText += '\n**Errors:**\n';
+        for (const error of connectivityResults.errors) {
+          responseText += `- ${error}\n`;
+        }
+      }
+
+      responseText += '\n**Tip:** Enable debug logging by setting `DEBUG_GROQ_QUEUE: true` in config.json or `DEBUG_GROQ_QUEUE=true` environment variable.';
+
+      await safeReply(message, {
+        content: responseText,
+        allowedMentions: allowedMentionsSafe(),
+      });
+    } catch (err) {
+      console.error('[GROQ_QUEUE_DEBUG] Error:', err);
+      await safeReply(message, {
+        content: `Debug check failed: ${err?.message || err}`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+    }
+  }
+
   const mentionReviewSubsystem = createMentionReviewSubsystem({
     client,
     config,
@@ -3664,8 +3875,22 @@ function applyGroqProvider(modelId) {
   const model = normalizeGroqModelId(modelId);
   if (!model) return null;
   config.groqChatModel = model;
+  // Also update groqChatModels array for consistency
+  config.groqChatModels = [model];
   saveConfig(config);
   return { model };
+}
+
+function applyGroqProviders(modelIds) {
+  const models = (Array.isArray(modelIds) ? modelIds : [modelIds])
+    .map((m) => normalizeGroqModelId(m))
+    .filter(Boolean);
+  if (models.length === 0) return null;
+  // Set primary model for legacy compatibility
+  config.groqChatModel = models[0];
+  config.groqChatModels = models;
+  saveConfig(config);
+  return { models };
 }
 
   async function handleAiChat(message, context = {}) {
@@ -3887,11 +4112,11 @@ function applyGroqProvider(modelId) {
           clearGroqKeyRateLimitIfExpired(key);
         }
         const restrictedErr = (
-          captionResult.status === 'rejected' && isGroqOrganizationRestrictedError(captionResult.reason)
+          captionResult.status === 'rejected' && (isGroqOrganizationRestrictedError(captionResult.reason) || isGroqServiceUnavailableError(captionResult.reason))
         )
           ? captionResult.reason
           : (
-            ocrResult.status === 'rejected' && isGroqOrganizationRestrictedError(ocrResult.reason)
+            ocrResult.status === 'rejected' && (isGroqOrganizationRestrictedError(ocrResult.reason) || isGroqServiceUnavailableError(ocrResult.reason))
           )
             ? ocrResult.reason
             : null;
@@ -4296,125 +4521,128 @@ function applyGroqProvider(modelId) {
         throw buildAllGroqKeysCoolingError(cooling);
       }
       let lastErr = null;
+      const modelList = resolveGroqChatModels();
 
       for (const key of keyPool) {
-        const modelName = resolveGroqChatModel();
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          const text = await groqChatCompletion({
-            apiKey: key,
-            model: modelName,
-            temperature,
-            maxTokens,
-            timeoutMs: aiTimeout,
-            messages: [
-              { role: 'system', content: system },
-              { role: 'user', content: userPayload },
-            ],
-          });
+        // Try each model in order (primary first, then alternatives)
+        for (const modelName of modelList) {
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            const text = await groqChatCompletion({
+              apiKey: key,
+              model: modelName,
+              temperature,
+              maxTokens,
+              timeoutMs: aiTimeout,
+              messages: [
+                { role: 'system', content: system },
+                { role: 'user', content: userPayload },
+              ],
+            });
 
-          lastErr = null;
-          markGroqInferenceUsage(key, { kind: 'chat', ok: true });
-          clearGroqKeyRateLimitIfExpired(key);
-          groqDepletedCounts.delete(key);
-          if (!String(text || '').trim()) {
-            console.error('[ai-chat] Groq returned blank text payload', {
+            lastErr = null;
+            markGroqInferenceUsage(key, { kind: 'chat', ok: true });
+            clearGroqKeyRateLimitIfExpired(key);
+            groqDepletedCounts.delete(key);
+            if (!String(text || '').trim()) {
+              console.error('[ai-chat] Groq returned blank text payload', {
+                guildId: message.guild?.id || '',
+                channelId: message.channel?.id || '',
+                messageId: message.id,
+                model: modelName,
+                key: maskApiKey(key),
+              });
+            }
+            return text;
+          } catch (e) {
+            lastErr = e;
+            markGroqInferenceUsage(key, {
+              kind: 'chat',
+              ok: false,
+              error: summarizeErr(e),
+            });
+            if (isGroqRateLimitError(e)) {
+              markGroqKeyRateLimited(key, e);
+            }
+            console.error('[ai-chat] Groq call failed', {
               guildId: message.guild?.id || '',
               channelId: message.channel?.id || '',
               messageId: message.id,
               model: modelName,
               key: maskApiKey(key),
+              aiTimeout,
+              isLightChat,
+              temperature,
+              status: e?.status || '',
+              code: e?.code || '',
+              finishReason: e?.finishReason || '',
+              error: summarizeErr(e),
+              responsePreview: String(e?.responsePreview || e?.body || '').slice(0, 260),
+              retryAfterMs: Number(e?.retryAfterMs || 0),
             });
-          }
-          return text;
-        } catch (e) {
-          lastErr = e;
-          markGroqInferenceUsage(key, {
-            kind: 'chat',
-            ok: false,
-            error: summarizeErr(e),
-          });
-          if (isGroqRateLimitError(e)) {
-            markGroqKeyRateLimited(key, e);
-          }
-          console.error('[ai-chat] Groq call failed', {
-            guildId: message.guild?.id || '',
-            channelId: message.channel?.id || '',
-            messageId: message.id,
-            model: modelName,
-            key: maskApiKey(key),
-            aiTimeout,
-            isLightChat,
-            temperature,
-            status: e?.status || '',
-            code: e?.code || '',
-            finishReason: e?.finishReason || '',
-            error: summarizeErr(e),
-            responsePreview: String(e?.responsePreview || e?.body || '').slice(0, 260),
-            retryAfterMs: Number(e?.retryAfterMs || 0),
-          });
 
-          if (isGroqOrganizationRestrictedError(e)) {
-            await handleGroqRestrictedKey({
-              keyRaw: key,
-              guild: message.guild,
-              context: 'ai-chat',
-            });
-            continue;
-          }
-
-          if (isGroqCreditDepletedError(e)) {
-            const nextCount = (groqDepletedCounts.get(key) || 0) + 1;
-            groqDepletedCounts.set(key, nextCount);
-
-            const masked = maskApiKey(key);
-            const totalKeys = keyPool.length;
-            const remainingKeys = keyPool.filter((k) => k && k !== key).length;
-            const remainingInfo = totalKeys ? ` | keys left ${remainingKeys}/${totalKeys}` : '';
-
-            if (!groqDepletedGlobalPinged.has(key)) {
-              const pingedGlobal = await pingCreatorInGlobalLog(client, config, {
+            if (isGroqOrganizationRestrictedError(e) || isGroqServiceUnavailableError(e)) {
+              await handleGroqRestrictedKey({
+                keyRaw: key,
                 guild: message.guild,
-                text: `groq api key depleted${masked ? ` (${masked})` : ''}${remainingInfo}`,
+                context: 'ai-chat',
               });
-              if (pingedGlobal) {
-                groqDepletedGlobalPinged.add(key);
-              } else {
-                console.error(`Global depletion ping not delivered for Groq key ${masked}; will retry.`);
-              }
+              continue;
             }
 
-            if (!groqDepletedCreatorNotified.has(key)) {
-              const notifiedFallback = await notifyCreatorLowCredits(client, { guild: message.guild, keyMasked: masked });
-              if (notifiedFallback) {
-                groqDepletedCreatorNotified.add(key);
-              } else {
-                console.error(`Fallback depletion alert not delivered for Groq key ${masked}; will retry.`);
-              }
-            }
+            if (isGroqCreditDepletedError(e)) {
+              const nextCount = (groqDepletedCounts.get(key) || 0) + 1;
+              groqDepletedCounts.set(key, nextCount);
 
-            // After repeated failures, remove depleted managed keys from the pool.
-            if (nextCount >= 3) {
-              if (groqKeys.length > 0) {
-                const dropped = dropGroqManagedKey(key);
-                if (dropped.removed) {
-                  groqDepletedCounts.delete(key);
-                  console.error(
-                    `Removed depleted Groq key ${masked} after ${nextCount} errors (${dropped.remaining} keys remain)`
-                  );
+              const masked = maskApiKey(key);
+              const totalKeys = keyPool.length;
+              const remainingKeys = keyPool.filter((k) => k && k !== key).length;
+              const remainingInfo = totalKeys ? ` | keys left ${remainingKeys}/${totalKeys}` : '';
+
+              if (!groqDepletedGlobalPinged.has(key)) {
+                const pingedGlobal = await pingCreatorInGlobalLog(client, config, {
+                  guild: message.guild,
+                  text: `groq api key depleted${masked ? ` (${masked})` : ''}${remainingInfo}`,
+                });
+                if (pingedGlobal) {
+                  groqDepletedGlobalPinged.add(key);
+                } else {
+                  console.error(`Global depletion ping not delivered for Groq key ${masked}; will retry.`);
                 }
               }
+
+              if (!groqDepletedCreatorNotified.has(key)) {
+                const notifiedFallback = await notifyCreatorLowCredits(client, { guild: message.guild, keyMasked: masked });
+                if (notifiedFallback) {
+                  groqDepletedCreatorNotified.add(key);
+                } else {
+                  console.error(`Fallback depletion alert not delivered for Groq key ${masked}; will retry.`);
+                }
+              }
+
+              // After repeated failures, remove depleted managed keys from the pool.
+              if (nextCount >= 3) {
+                if (groqKeys.length > 0) {
+                  const dropped = dropGroqManagedKey(key);
+                  if (dropped.removed) {
+                    groqDepletedCounts.delete(key);
+                    console.error(
+                      `Removed depleted Groq key ${masked} after ${nextCount} errors (${dropped.remaining} keys remain)`
+                    );
+                  }
+                }
+              }
+
+              continue;
             }
 
-            continue;
-          }
+            if (isGroqRateLimitError(e)) {
+              continue;
+            }
 
-          if (isGroqRateLimitError(e)) {
-            continue;
+            groqDepletedCounts.delete(key);
+            // Try next model in the fallback chain
           }
-
-          groqDepletedCounts.delete(key);
-          // try next key
         }
       }
 
@@ -5080,6 +5308,14 @@ function applyGroqProvider(modelId) {
         await handleLoadstringInfoCommand(message, args[0], prefix);
         return;
       }
+      if (cmd === 'lsdebug') {
+        await handleLoadstringDebugCommand(message);
+        return;
+      }
+      if (cmd === 'groqqueue' || cmd === 'groqdebug') {
+        await handleGroqQueueDebugCommand(message);
+        return;
+      }
     }
 
     if (cmd === 'blacklist' || cmd === 'aibl' || cmd === 'aiblacklist') {
@@ -5519,37 +5755,45 @@ function applyGroqProvider(modelId) {
         return;
       }
 
-      const modelInput = normalizeGroqModelId(args[0]);
-      if (!modelInput) {
-        const current = resolveGroqChatModel();
+      // Support comma-separated list of models: <primary>,<model2>,<model3>,...
+      const modelInputRaw = args.join(' ');
+      if (!modelInputRaw || !modelInputRaw.trim()) {
+        const currentModels = resolveGroqChatModels();
         await safeReply(message, {
-          content: `usage: \`${prefix}setgq <number|modelId>\`\ncurrent: ${current}`,
+          content: `usage: \`${prefix}setgq <primary-model>[,<model2>,<model3>,...]\`\ncurrent: ${currentModels.join(' → ')}`,
           allowedMentions: allowedMentionsSafe(),
         });
         return;
       }
 
+      const modelInputs = modelInputRaw.split(',').map((s) => s.trim()).filter(Boolean);
       const modelState = await fetchAvailableGroqModels({ forceRefresh: true });
-      const modelIndex = parseListIndex(modelInput);
-      const matchByIndex = modelIndex > 0 ? modelState.models[modelIndex - 1] : '';
-      const match = matchByIndex || modelState.models.find((m) => m.toLowerCase() === modelInput.toLowerCase());
-      if (!match) {
-        await safeReply(message, {
-          content: modelState.models.length
-            ? (
-              modelIndex > 0
-                ? `invalid model number. run \`${prefix}lsgqmodel\` to see available models`
-                : `invalid model. run \`${prefix}lsgqmodel\` to see available models`
-            )
-            : 'could not fetch Groq model list. add a valid Groq key and try again',
-          allowedMentions: allowedMentionsSafe(),
-        });
-        return;
+      const matchedModels = [];
+
+      for (const modelInput of modelInputs) {
+        const normalizedInput = normalizeGroqModelId(modelInput);
+        const modelIndex = parseListIndex(normalizedInput);
+        const matchByIndex = modelIndex > 0 ? modelState.models[modelIndex - 1] : '';
+        const match = matchByIndex || modelState.models.find((m) => m.toLowerCase() === normalizedInput.toLowerCase());
+        if (!match) {
+          await safeReply(message, {
+            content: modelState.models.length
+              ? (
+                modelIndex > 0
+                  ? `invalid model number "${modelIndex}". run \`${prefix}lsgqmodel\` to see available models`
+                  : `invalid model "${normalizedInput}". run \`${prefix}lsgqmodel\` to see available models`
+              )
+              : 'could not fetch Groq model list. add a valid Groq key and try again',
+            allowedMentions: allowedMentionsSafe(),
+          });
+          return;
+        }
+        matchedModels.push(match);
       }
 
-      const res = applyGroqProvider(match);
+      const res = applyGroqProviders(matchedModels);
       await safeReply(message, {
-        content: `model set to ${res.model}`,
+        content: `models set to ${res.models.join(' → ')} (primary: ${res.models[0]})`,
         allowedMentions: allowedMentionsSafe(),
       });
       return;

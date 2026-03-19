@@ -14,6 +14,8 @@
   "LOADSTRING_API_BASE_URL": "http://127.0.0.1:3006",
   "LOADSTRING_API_TOKEN": "replace-with-sc-internal-token",
   "LOADSTRING_API_TIMEOUT_MS": 8000,
+  "DEBUG_LOADSTRING_API": false,
+  "DEBUG_GROQ_QUEUE": false,
   "GROQ_KEY_QUEUE_BASE_URL": "http://127.0.0.1:3006",
   "GROQ_KEY_QUEUE_TOKEN": "replace-with-sc-internal-token",
   "GROQ_KEY_QUEUE_POLL_MS": 120000,

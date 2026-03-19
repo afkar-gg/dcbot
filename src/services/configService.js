@@ -76,6 +76,12 @@ function loadConfig() {
     cfg.groqChatModel = '';
     changed = true;
   }
+  // Support multiple models with fallback (primary first, then alternatives)
+  if (!Array.isArray(cfg.groqChatModels) || cfg.groqChatModels.length === 0) {
+    // Migrate from single model to array if groqChatModel is set
+    cfg.groqChatModels = cfg.groqChatModel ? [cfg.groqChatModel] : [];
+    changed = true;
+  }
   if (!cfg.groqModelCache || typeof cfg.groqModelCache !== 'object' || Array.isArray(cfg.groqModelCache)) {
     cfg.groqModelCache = { fetchedAt: 0, models: [] };
     changed = true;

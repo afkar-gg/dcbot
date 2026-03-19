@@ -116,7 +116,8 @@ Changes the prefix for the current server.
 
 ## Notes
 - AI chatbot uses **Groq API**. Configure `GROQ_API_KEY` in `config.json` or save keys via `s.addgq <key>`.
-- Creator Groq commands: `s.addgq`, `s.rmgq <number|key|masked>`, `s.lsgq [un]`, `s.lsgqmodel`, `s.setgq <number|modelId>`.
+- Creator Groq commands: `s.addgq`, `s.rmgq <number|key|masked>`, `s.lsgq [un]`, `s.lsgqmodel`, `s.setgq <primary>[,<model2>,<model3>,...]`.
+- Use `s.setgq` with comma-separated models to set up automatic fallback (e.g., `s.setgq llama-3.3-70b-versatile,mixtral-8x7b-3278-v1`). The bot tries each model in order when the primary fails (over capacity, rate limit, etc.).
 - Creator utility commands renamed: `s.setglog <#channel|channelId|off>` and `s.wl <add|remove|list> <@user|id?>`.
 - Creator-only raw AI mode toggle: `s.q <on|off|toggle|status>` (turns off personality/sanitization shaping).
 - AI chat is rate-limited per user (config keys: `AI_RATE_LIMIT_PER_MINUTE`, `AI_RATE_LIMIT_PING_ONLY_PER_MINUTE`).
