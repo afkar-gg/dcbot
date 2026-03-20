@@ -154,6 +154,10 @@ const BOT_USERNAME_TAG = 'Goose#9289';
 const BOT_INVITE_URL = 'https://discord.com/oauth2/authorize?client_id=803528296590868480&scope=bot&permissions=277025643584';
 const DEFAULT_GROQ_VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
 const DEFAULT_HF_VISION_MODEL = 'meta-llama/Llama-3.2-11B-Vision-Instruct';
+const REQUIRED_HF_CHAT_MODELS = [
+  'moonshotai/Kimi-K2.5',
+  'moonshotai/Kimi-K2-Instruct',
+];
 const ALLOWED_TEXT_ATTACHMENT_EXTS = new Set(['.txt', '.js', '.lua']);
 const ALLOWED_IMAGE_ATTACHMENT_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
 const MAX_TEXT_ATTACHMENT_BYTES = ATTACHMENT_TEXT_MAX_BYTES;
@@ -3216,14 +3220,21 @@ function createBot({ loadstringStore } = {}) {
     return String(value || '').trim();
   }
 
+  function mergeRequiredHfChatModels(models = []) {
+    const normalizedRequired = REQUIRED_HF_CHAT_MODELS.map((m) => normalizeHfModelId(m)).filter(Boolean);
+    const normalizedModels = models.map((m) => normalizeHfModelId(m)).filter(Boolean);
+    return [...new Set([...normalizedRequired, ...normalizedModels])];
+  }
+
   function readCachedHfModels() {
     const cache = config.hfModelCache && typeof config.hfModelCache === 'object'
       ? config.hfModelCache
       : { fetchedAt: 0, models: [] };
     const fetchedAt = Number(cache.fetchedAt);
-    const models = Array.isArray(cache.models)
+    const cachedModels = Array.isArray(cache.models)
       ? cache.models.map((m) => normalizeHfModelId(m)).filter(Boolean)
       : [];
+    const models = mergeRequiredHfChatModels(cachedModels);
     return {
       fetchedAt: Number.isFinite(fetchedAt) ? fetchedAt : 0,
       models,
@@ -3231,7 +3242,7 @@ function createBot({ loadstringStore } = {}) {
   }
 
   function writeCachedHfModels(models = []) {
-    const normalized = [...new Set(models.map((m) => normalizeHfModelId(m)).filter(Boolean))];
+    const normalized = mergeRequiredHfChatModels(models);
     config.hfModelCache = {
       fetchedAt: Date.now(),
       models: normalized,

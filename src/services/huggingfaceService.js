@@ -1,5 +1,6 @@
 const HF_CHAT_URL = 'https://router.huggingface.co/v1/chat/completions';
 const HF_MODELS_URL = 'https://huggingface.co/api/models';
+const KIMI_MODEL_PREFIX = 'moonshotai/kimi-k2';
 
 function parseRetryAfterMsFromHeaders(headers) {
   const raw = headers?.get?.('retry-after');
@@ -52,7 +53,9 @@ function extractRetryAfterMs({ headers, body } = {}) {
 function parseOpenAiText(content) {
   if (typeof content === 'string') return content.trim();
   if (content && typeof content === 'object' && !Array.isArray(content)) {
-    const single = content?.text || content?.content || content?.output_text || '';
+    const partType = String(content?.type || '').toLowerCase();
+    if (partType && partType !== 'text' && partType !== 'output_text') return '';
+    const single = content?.text || content?.output_text || content?.content || '';
     if (typeof single === 'string') return single.trim();
     return '';
   }
@@ -61,12 +64,19 @@ function parseOpenAiText(content) {
       .map((part) => {
         if (typeof part === 'string') return part;
         if (!part || typeof part !== 'object') return '';
-        return part?.text || part?.content || part?.output_text || '';
+        const partType = String(part?.type || '').toLowerCase();
+        if (partType && partType !== 'text' && partType !== 'output_text') return '';
+        return part?.text || part?.output_text || part?.content || '';
       })
       .join(' ')
       .trim();
   }
   return '';
+}
+
+function isKimiModel(model) {
+  const normalized = String(model || '').trim().toLowerCase();
+  return normalized.startsWith(KIMI_MODEL_PREFIX);
 }
 
 function normalizeAuthKey(apiKey) {
@@ -89,6 +99,17 @@ async function huggingfaceChatCompletion({
   const token = normalizeAuthKey(apiKey);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const payload = {
+    model,
+    messages,
+    temperature,
+    max_tokens: maxTokens,
+  };
+
+  // Kimi supports "thinking" mode controls; disable it to avoid reasoning leaks.
+  if (isKimiModel(model)) {
+    payload.thinking = { type: 'disabled' };
+  }
 
   try {
     const res = await fetch(HF_CHAT_URL, {
@@ -97,12 +118,7 @@ async function huggingfaceChatCompletion({
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-      }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
 
