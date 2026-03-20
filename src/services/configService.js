@@ -25,7 +25,14 @@ function loadConfig() {
       groqApiKeys: [],
       groqKeyUsage: {},
       groqChatModel: '',
+      groqChatModels: [],
       groqModelCache: { fetchedAt: 0, models: [] },
+      hfApiKeys: [],
+      hfKeyUsage: {},
+      hfChatModel: '',
+      hfChatModels: [],
+      hfModelCache: { fetchedAt: 0, models: [] },
+      aiInferenceProviders: ['groq', 'huggingface'],
       globalLogChannelId: null,
       aiBlacklistUserIds: [],
       creatorWhitelistUserIds: [],
@@ -47,20 +54,6 @@ function loadConfig() {
   let changed = false;
   if (!cfg.guilds || typeof cfg.guilds !== 'object') {
     cfg.guilds = {};
-    changed = true;
-  }
-
-  // Full migration away from Hugging Face-managed key state.
-  if (typeof cfg.hfApiKeys !== 'undefined') {
-    delete cfg.hfApiKeys;
-    changed = true;
-  }
-  if (typeof cfg.hfKeyUsage !== 'undefined') {
-    delete cfg.hfKeyUsage;
-    changed = true;
-  }
-  if (typeof cfg.hfChatModel !== 'undefined') {
-    delete cfg.hfChatModel;
     changed = true;
   }
 
@@ -95,6 +88,51 @@ function loadConfig() {
       cfg.groqModelCache.fetchedAt = 0;
       changed = true;
     }
+  }
+
+  if (!Array.isArray(cfg.hfApiKeys)) {
+    cfg.hfApiKeys = [];
+    changed = true;
+  }
+  if (!cfg.hfKeyUsage || typeof cfg.hfKeyUsage !== 'object' || Array.isArray(cfg.hfKeyUsage)) {
+    cfg.hfKeyUsage = {};
+    changed = true;
+  }
+  if (typeof cfg.hfChatModel !== 'string') {
+    cfg.hfChatModel = '';
+    changed = true;
+  }
+  if (!Array.isArray(cfg.hfChatModels) || cfg.hfChatModels.length === 0) {
+    cfg.hfChatModels = cfg.hfChatModel ? [cfg.hfChatModel] : [];
+    changed = true;
+  }
+  if (!cfg.hfModelCache || typeof cfg.hfModelCache !== 'object' || Array.isArray(cfg.hfModelCache)) {
+    cfg.hfModelCache = { fetchedAt: 0, models: [] };
+    changed = true;
+  } else {
+    if (!Array.isArray(cfg.hfModelCache.models)) {
+      cfg.hfModelCache.models = [];
+      changed = true;
+    }
+    const fetchedAt = Number(cfg.hfModelCache.fetchedAt);
+    if (!Number.isFinite(fetchedAt) || fetchedAt < 0) {
+      cfg.hfModelCache.fetchedAt = 0;
+      changed = true;
+    }
+  }
+
+  const normalizedProviders = Array.isArray(cfg.aiInferenceProviders)
+    ? cfg.aiInferenceProviders
+      .map((v) => String(v || '').trim().toLowerCase())
+      .filter((v) => v === 'groq' || v === 'huggingface')
+    : [];
+  const dedupedProviders = [...new Set(normalizedProviders)];
+  if (dedupedProviders.length !== 2) {
+    cfg.aiInferenceProviders = ['groq', 'huggingface'];
+    changed = true;
+  } else if (JSON.stringify(cfg.aiInferenceProviders) !== JSON.stringify(dedupedProviders)) {
+    cfg.aiInferenceProviders = dedupedProviders;
+    changed = true;
   }
 
   if (typeof cfg.globalLogChannelId === 'undefined') cfg.globalLogChannelId = null;

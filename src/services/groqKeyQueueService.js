@@ -147,6 +147,15 @@ async function peekGroqKey() {
   return payload.item || null;
 }
 
+async function peekGroqKeysBatch(limit = 100) {
+  const payload = await requestInternal({
+    method: 'GET',
+    pathname: '/internal/groq-keys/batch',
+    query: { limit },
+  });
+  return Array.isArray(payload.items) ? payload.items : [];
+}
+
 async function removeGroqKeyById(id) {
   const payload = await requestInternal({
     method: 'DELETE',
@@ -247,6 +256,7 @@ function getGroqQueueDebugInfo() {
 
 module.exports = {
   peekGroqKey,
+  peekGroqKeysBatch,
   removeGroqKeyById,
   checkGroqQueueConnectivity,
   getGroqQueueDebugInfo,

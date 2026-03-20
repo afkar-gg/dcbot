@@ -14,6 +14,29 @@ function debugLog(...args) {
   }
 }
 
+function readHeadersForDebug(headers) {
+  if (!headers) return {};
+  if (typeof headers.entries === 'function') {
+    try {
+      return Object.fromEntries(headers.entries());
+    } catch {
+      return {};
+    }
+  }
+  if (typeof headers.forEach === 'function') {
+    const out = {};
+    try {
+      headers.forEach((value, key) => {
+        out[String(key)] = String(value);
+      });
+      return out;
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 function buildInternalUrl(pathname, query = {}) {
   const base = String(LOADSTRING_API_BASE_URL || '').trim();
   if (!base) throw new Error('LOADSTRING_API_BASE_URL is required');
@@ -67,7 +90,7 @@ async function requestInternal({ method, pathname, query, body } = {}) {
       status: res.status,
       statusText: res.statusText,
       ok: res.ok,
-      headers: Object.fromEntries(res.headers.entries()),
+      headers: readHeadersForDebug(res.headers),
     });
 
     const raw = await res.text().catch((readErr) => {

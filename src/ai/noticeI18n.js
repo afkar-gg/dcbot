@@ -1,6 +1,6 @@
 /**
  * Language detection for reply context.
- * Uses script + latin heuristics; returns empty string when uncertain.
+ * Uses script + latin heuristics; falls back to English when uncertain.
  */
 
 const SUPPORTED_LOCALES = new Set(['en', 'id', 'es', 'pt', 'fr', 'de', 'tr', 'ar', 'ru', 'ja', 'ko', 'zh']);
@@ -194,7 +194,7 @@ function detectLocaleFromText(text) {
 
 /**
  * Detect reply language based on script + Latin heuristics.
- * Returns '' when uncertain.
+ * Returns 'en' when uncertain.
  */
 function detectReplyLanguage({ messageText = '', repliedText = '', allowReplyFallback = true } = {}) {
   const messageRaw = String(messageText || '').trim();
@@ -209,7 +209,7 @@ function detectReplyLanguage({ messageText = '', repliedText = '', allowReplyFal
   if (primary && detectIndonesianSignal(primary)) return 'id';
   if (fallback && detectIndonesianSignal(fallback)) return 'id';
 
-  return '';
+  return 'en';
 }
 
 function getLocalizedAttachmentNotice(kind, locale = 'en') {

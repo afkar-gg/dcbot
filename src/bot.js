@@ -32,9 +32,26 @@ const {
 
 const { buildModLogEmbed, sendLogEmbed } = require('./services/logService');
 const { groqChatCompletion, groqImageCaption, groqImageOcr, listGroqModels } = require('./services/groqService');
+const {
+  huggingfaceChatCompletion,
+  huggingfaceImageCaption,
+  huggingfaceImageOcr,
+  listHuggingFaceModels,
+} = require('./services/huggingfaceService');
 const { neutralizeMentions } = require('./utils/sanitize');
 const { createLoadstringStore, checkLoadstringApiConnectivity, getLoadstringApiDebugInfo } = require('./services/loadstringApiStore');
-const { peekGroqKey, removeGroqKeyById, checkGroqQueueConnectivity, getGroqQueueDebugInfo } = require('./services/groqKeyQueueService');
+const {
+  peekGroqKey,
+  peekGroqKeysBatch,
+  removeGroqKeyById,
+  checkGroqQueueConnectivity,
+  getGroqQueueDebugInfo,
+} = require('./services/groqKeyQueueService');
+const {
+  peekHfKey,
+  peekHfKeysBatch,
+  removeHfKeyById,
+} = require('./services/hfKeyQueueService');
 const {
   LOADSTRING_PUBLIC_BASE_URL,
   LOADSTRING_MAX_PER_USER,
@@ -89,6 +106,9 @@ const {
   GROQ_API_KEY: RUNTIME_GROQ_API_KEY,
   GROQ_CHAT_MODEL: RUNTIME_GROQ_CHAT_MODEL,
   GROQ_VISION_MODEL: RUNTIME_GROQ_VISION_MODEL,
+  HUGGINGFACE_API_KEY: RUNTIME_HUGGINGFACE_API_KEY,
+  HUGGINGFACE_CHAT_MODEL: RUNTIME_HUGGINGFACE_CHAT_MODEL,
+  HUGGINGFACE_VISION_MODEL: RUNTIME_HUGGINGFACE_VISION_MODEL,
   AI_CALL_TIMEOUT_MS,
   BOT_TIMEZONE,
   BOT_TIME_LOCALE,
@@ -115,6 +135,7 @@ const {
   AI_FALLBACK_REPLY_TEXT,
   AI_FORCE_VISIBLE_REPLY,
   GROQ_KEY_QUEUE_POLL_MS,
+  HF_KEY_QUEUE_POLL_MS,
 } = require('./services/runtimeConfig');
 const {
   extractWebSearchQuery,
@@ -128,9 +149,11 @@ const CREATOR_USER_ID = '777427217490903080';
 const CREATOR_ALERT_GUILD_ID = '1387021291898273842';
 const CREATOR_ALERT_CHANNEL_ID = '1387021963511468073';
 const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
+const DEFAULT_HF_MODEL = 'meta-llama/Llama-3.3-70B-Instruct';
 const BOT_USERNAME_TAG = 'Goose#9289';
 const BOT_INVITE_URL = 'https://discord.com/oauth2/authorize?client_id=803528296590868480&scope=bot&permissions=277025643584';
 const DEFAULT_GROQ_VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
+const DEFAULT_HF_VISION_MODEL = 'meta-llama/Llama-3.2-11B-Vision-Instruct';
 const ALLOWED_TEXT_ATTACHMENT_EXTS = new Set(['.txt', '.js', '.lua']);
 const ALLOWED_IMAGE_ATTACHMENT_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
 const MAX_TEXT_ATTACHMENT_BYTES = ATTACHMENT_TEXT_MAX_BYTES;
@@ -155,6 +178,7 @@ const FALLBACK_AI_REPLY_TEXT = String(AI_FALLBACK_REPLY_TEXT || 'i glitched lol 
 const API_LIST_PAGE_SIZE = 5;
 const API_LIST_PANEL_TTL_MS = 30 * 60_000;
 const GROQ_MODEL_CACHE_TTL_MS = 10 * 60_000;
+const HF_MODEL_CACHE_TTL_MS = 10 * 60_000;
 const GROQ_RATE_LIMIT_FALLBACK_MS = 30_000;
 
 async function pingCreatorInGlobalLog(client, config, { guild, text } = {}) {
@@ -401,12 +425,18 @@ function buildHelpText(prefix, { includeAll = false } = {}) {
   if (includeAll) {
     lines.push('');
     lines.push('**Creator/Whitelist**');
+    lines.push(`• \`${prefix}setprime <groq|huggingface>,<groq|huggingface>\` - Set primary/fallback inference providers`);
     lines.push(`• \`${prefix}q <on|off|toggle|status>\` - Toggle raw AI mode (no personality/sanitize shaping)`);
     lines.push(`• \`${prefix}addgq <key>\` - Save a Groq API key to the managed key pool`);
     lines.push(`• \`${prefix}rmgq <number|key|masked>\` - Remove a saved Groq API key`);
     lines.push(`• \`${prefix}lsgq [un]\` - List saved Groq keys (add \`un\` to DM unmasked keys)`);
     lines.push(`• \`${prefix}lsgqmodel\` - List available Groq models`);
     lines.push(`• \`${prefix}setgq <primary>[,<model2>,<model3>,...]\` - Set Groq chat model(s) with fallback`);
+    lines.push(`• \`${prefix}addhf <key>\` - Save a Hugging Face API key to the managed key pool`);
+    lines.push(`• \`${prefix}rmhf <number|key|masked>\` - Remove a saved Hugging Face API key`);
+    lines.push(`• \`${prefix}lshf [un]\` - List saved Hugging Face keys (add \`un\` to DM unmasked keys)`);
+    lines.push(`• \`${prefix}lshfmodel\` - List available Hugging Face models`);
+    lines.push(`• \`${prefix}sethf <primary>[,<model2>,<model3>,...]\` - Set Hugging Face chat model(s) with fallback`);
     lines.push(`• \`${prefix}servers [noinvites]\` - DM server inventory (optionally without invites)`);
     lines.push(`• \`${prefix}setglog <#channel|channelId|off>\` - Set or disable the global low-credit log channel`);
     lines.push(`• \`${prefix}wl <add|remove|list> <@user|id?>\` - Manage creator whitelist access`);
@@ -1044,8 +1074,70 @@ async function fetchRecentChannelMessages(message, limit = MAX_RANDOM_CONTEXT_SC
   if (!fetched) return [];
 
   return [...fetched.values()]
-    .filter((m) => m && m.id !== message.id)
-    .filter((m) => !m.author?.bot);
+    .filter((m) => m && m.id !== message.id);
+}
+
+function getEmbedContextBits(message) {
+  const embeds = Array.isArray(message?.embeds) ? message.embeds : [];
+  const out = [];
+  for (const embed of embeds.slice(0, 4)) {
+    const bits = [];
+    const title = stripControlChars(embed?.title || '');
+    const description = stripControlChars(embed?.description || '');
+    const author = stripControlChars(embed?.author?.name || '');
+    const footer = stripControlChars(embed?.footer?.text || '');
+    const imageUrl = String(embed?.image?.url || embed?.thumbnail?.url || '').trim();
+    const videoUrl = String(embed?.video?.url || '').trim();
+    if (author) bits.push(`author: ${author}`);
+    if (title) bits.push(`title: ${title}`);
+    if (description) bits.push(`description: ${description}`);
+    if (Array.isArray(embed?.fields) && embed.fields.length > 0) {
+      const fieldText = embed.fields
+        .slice(0, 4)
+        .map((f) => {
+          const n = stripControlChars(f?.name || '');
+          const v = stripControlChars(f?.value || '');
+          return n || v ? `${n}${n && v ? ': ' : ''}${v}` : '';
+        })
+        .filter(Boolean)
+        .join(' | ');
+      if (fieldText) bits.push(`fields: ${fieldText}`);
+    }
+    if (imageUrl) bits.push(`image: ${imageUrl}`);
+    if (videoUrl) bits.push(`video: ${videoUrl}`);
+    if (footer) bits.push(`footer: ${footer}`);
+    if (bits.length > 0) out.push(bits.join(' | '));
+  }
+  return out;
+}
+
+function getMessageTextForContext(msg) {
+  const content = stripControlChars(msg?.content || '');
+  const embedBits = getEmbedContextBits(msg);
+  const attachmentBits = msg?.attachments
+    ? [...msg.attachments.values()]
+      .slice(0, 4)
+      .map((att) => {
+        const name = stripControlChars(att?.name || 'attachment');
+        const url = String(att?.url || att?.proxyURL || '').trim();
+        return `${name}${url ? ` ${url}` : ''}`;
+      })
+      .filter(Boolean)
+    : [];
+  const stickerBits = msg?.stickers
+    ? [...msg.stickers.values()]
+      .slice(0, 4)
+      .map((st) => stripControlChars(st?.name || 'sticker'))
+      .filter(Boolean)
+    : [];
+  return [
+    content,
+    ...embedBits,
+    ...attachmentBits,
+    ...stickerBits,
+  ]
+    .filter(Boolean)
+    .join(' ');
 }
 
 function tokenizeForContextRelevance(text) {
@@ -1072,8 +1164,8 @@ function tokenizeForContextRelevance(text) {
 }
 
 function scoreContextRelevance(candidateMsg, anchorMsg, { prefix = '' } = {}) {
-  const candidateText = stripControlChars(candidateMsg?.content || '');
-  const anchorText = stripControlChars(anchorMsg?.content || '');
+  const candidateText = getMessageTextForContext(candidateMsg);
+  const anchorText = getMessageTextForContext(anchorMsg);
 
   const candidateTokens = tokenizeForContextRelevance(candidateText);
   const anchorTokens = tokenizeForContextRelevance(anchorText);
@@ -1133,6 +1225,24 @@ function selectAdaptiveFallbackContext(
   return selected
     .map((entry) => entry.msg)
     .sort((a, b) => Number(a?.createdTimestamp || 0) - Number(b?.createdTimestamp || 0));
+}
+
+function detectContextTopicMix(contextMessages = [], anchorMsg) {
+  const msgs = Array.isArray(contextMessages) ? contextMessages : [];
+  if (msgs.length < 4) return { mixed: false, overlapAvg: 0 };
+
+  const anchorTokens = new Set(tokenizeForContextRelevance(getMessageTextForContext(anchorMsg)));
+  const overlapRatios = msgs.map((msg) => {
+    const tokens = tokenizeForContextRelevance(getMessageTextForContext(msg));
+    if (tokens.length === 0 || anchorTokens.size === 0) return 0;
+    const overlap = tokens.reduce((acc, token) => acc + (anchorTokens.has(token) ? 1 : 0), 0);
+    return overlap / Math.max(1, Math.min(tokens.length, 8));
+  });
+
+  const overlapAvg = overlapRatios.reduce((acc, n) => acc + n, 0) / Math.max(1, overlapRatios.length);
+  const lowOverlapCount = overlapRatios.filter((n) => n < 0.2).length;
+  const mixed = overlapAvg < 0.25 || lowOverlapCount >= Math.ceil(msgs.length * 0.45);
+  return { mixed, overlapAvg };
 }
 
 function normalizeMemberLookupName(value) {
@@ -2113,15 +2223,34 @@ function formatMessageForContext(msg) {
   const tag = stripControlChars(msg?.author?.tag || msg?.author?.username || 'unknown');
   const display = stripControlChars(msg?.member?.displayName || msg?.author?.globalName || '');
   const content = stripControlChars(msg?.content || '');
+  const isBot = !!msg?.author?.bot;
 
   const bits = [];
   const who = display && display.toLowerCase() !== tag.toLowerCase() ? `${tag} (${display})` : tag;
-  bits.push(`${who} [id ${userId}]: ${content || '(no text)'}`);
+  bits.push(`${who} [id ${userId}${isBot ? ' | bot' : ''}]: ${content || '(no text)'}`);
 
   if (hasMediaAttachment(msg)) {
     const aCount = msg.attachments?.size || 0;
     const sCount = msg.stickers?.size || 0;
-    bits.push(`[attachment ${aCount} sticker ${sCount}]`);
+    const eCount = Array.isArray(msg?.embeds) ? msg.embeds.length : 0;
+    bits.push(`[attachment ${aCount} sticker ${sCount} embed ${eCount}]`);
+  }
+
+  const attachmentLines = msg?.attachments
+    ? [...msg.attachments.values()]
+      .slice(0, 3)
+      .map((att) => {
+        const name = stripControlChars(att?.name || 'attachment');
+        const url = String(att?.url || att?.proxyURL || '').trim();
+        return `[attachment: ${name}${url ? ` | ${url}` : ''}]`;
+      })
+      .filter(Boolean)
+    : [];
+  bits.push(...attachmentLines);
+
+  const embedBits = getEmbedContextBits(msg);
+  if (embedBits.length > 0) {
+    bits.push(...embedBits.map((line) => `[embed: ${line}]`));
   }
 
   return bits.join('\n');
@@ -2325,6 +2454,7 @@ function createBot({ loadstringStore } = {}) {
   }
 
   const GROQ_API_KEY = RUNTIME_GROQ_API_KEY;
+  const HUGGINGFACE_API_KEY = RUNTIME_HUGGINGFACE_API_KEY;
 
   const config = loadConfig();
   const lsStore = loadstringStore || createLoadstringStore();
@@ -2332,10 +2462,21 @@ function createBot({ loadstringStore } = {}) {
     config.groqKeyUsage = {};
     saveConfig(config);
   }
+  if (!config.hfKeyUsage || typeof config.hfKeyUsage !== 'object' || Array.isArray(config.hfKeyUsage)) {
+    config.hfKeyUsage = {};
+    saveConfig(config);
+  }
+  if (!Array.isArray(config.aiInferenceProviders) || config.aiInferenceProviders.length !== 2) {
+    config.aiInferenceProviders = ['groq', 'huggingface'];
+    saveConfig(config);
+  }
 
   let groqUsageSaveTimer = null;
   let groqUsageDirty = false;
   const groqUnmanagedRateLimit = new Map();
+  let hfUsageSaveTimer = null;
+  let hfUsageDirty = false;
+  const hfUnmanagedRateLimit = new Map();
 
   function ensureGroqUsageStore() {
     if (!config.groqKeyUsage || typeof config.groqKeyUsage !== 'object' || Array.isArray(config.groqKeyUsage)) {
@@ -2389,28 +2530,43 @@ function createBot({ loadstringStore } = {}) {
 
   async function pollGroqKeyQueue({ reason = 'interval' } = {}) {
     try {
-      const item = await peekGroqKey();
-      if (!item) return;
-      const key = String(item.key || '').trim();
-      if (!/^gsk_[a-zA-Z0-9_-]{16,}$/.test(key)) {
-        console.error(`[groq-queue] invalid key received (${reason})`);
+      let items = await peekGroqKeysBatch(100);
+      if (!Array.isArray(items) || items.length === 0) {
+        const single = await peekGroqKey();
+        items = single ? [single] : [];
+      }
+      if (items.length === 0) return;
+
+      let changed = false;
+      for (const item of items) {
+        if (!item?.id) continue;
+        const key = String(item.key || '').trim();
+        if (!/^gsk_[a-zA-Z0-9_-]{16,}$/.test(key)) {
+          console.error(`[groq-queue] invalid key received (${reason})`);
+          // eslint-disable-next-line no-await-in-loop
+          await removeGroqKeyById(item.id);
+          continue;
+        }
+
+        const keys = Array.isArray(config.groqApiKeys) ? config.groqApiKeys : [];
+        if (!keys.includes(key)) {
+          keys.push(key);
+          config.groqApiKeys = keys;
+          ensureGroqUsageRecord(key);
+          groqRestrictedCreatorNotified.delete(key);
+          changed = true;
+          console.log(`[groq-queue] added groq key ${maskApiKey(key)} (total ${keys.length})`);
+        } else {
+          console.log(`[groq-queue] key already present ${maskApiKey(key)}; clearing queue item`);
+        }
+
+        // eslint-disable-next-line no-await-in-loop
         await removeGroqKeyById(item.id);
-        return;
       }
 
-      const keys = Array.isArray(config.groqApiKeys) ? config.groqApiKeys : [];
-      if (!keys.includes(key)) {
-        keys.push(key);
-        config.groqApiKeys = keys;
-        ensureGroqUsageRecord(key);
-        groqRestrictedCreatorNotified.delete(key);
+      if (changed) {
         saveConfig(config);
-        console.log(`[groq-queue] added groq key ${maskApiKey(key)} (total ${keys.length})`);
-      } else {
-        console.log(`[groq-queue] key already present ${maskApiKey(key)}; clearing queue item`);
       }
-
-      await removeGroqKeyById(item.id);
     } catch (err) {
       console.error('[groq-queue] poll failed:', {
         error: err?.message || err,
@@ -2436,6 +2592,55 @@ function createBot({ loadstringStore } = {}) {
       } else if (err?.name === 'AbortError' || err?.code === 'GROQ_KEY_QUEUE_TIMEOUT') {
         console.error('[groq-queue] The request timed out. Check server performance or increase LOADSTRING_API_TIMEOUT_MS.');
       }
+    }
+  }
+
+  async function pollHfKeyQueue({ reason = 'interval' } = {}) {
+    try {
+      let items = await peekHfKeysBatch(100);
+      if (!Array.isArray(items) || items.length === 0) {
+        const single = await peekHfKey();
+        items = single ? [single] : [];
+      }
+      if (items.length === 0) return;
+
+      let changed = false;
+      for (const item of items) {
+        if (!item?.id) continue;
+        const key = String(item.key || '').trim();
+        if (!/^hf_[a-zA-Z0-9_-]{16,}$/.test(key)) {
+          console.error(`[hf-queue] invalid key received (${reason})`);
+          // eslint-disable-next-line no-await-in-loop
+          await removeHfKeyById(item.id);
+          continue;
+        }
+
+        const keys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys : [];
+        if (!keys.includes(key)) {
+          keys.push(key);
+          config.hfApiKeys = keys;
+          ensureHfUsageRecord(key);
+          changed = true;
+          console.log(`[hf-queue] added hf key ${maskApiKey(key)} (total ${keys.length})`);
+        } else {
+          console.log(`[hf-queue] key already present ${maskApiKey(key)}; clearing queue item`);
+        }
+
+        // eslint-disable-next-line no-await-in-loop
+        await removeHfKeyById(item.id);
+      }
+
+      if (changed) {
+        saveConfig(config);
+      }
+    } catch (err) {
+      console.error('[hf-queue] poll failed:', {
+        error: err?.message || err,
+        code: err?.code,
+        status: err?.status,
+        stack: err?.stack,
+        debugInfo: err?.debugInfo,
+      });
     }
   }
 
@@ -2472,6 +2677,26 @@ function createBot({ loadstringStore } = {}) {
     return {
       removed: true,
       remaining: config.groqApiKeys.length,
+      masked: maskApiKey(key),
+    };
+  }
+
+  function dropHfManagedKey(keyRaw = '') {
+    const key = String(keyRaw || '').trim();
+    if (!key) return { removed: false, remaining: 0 };
+    const keys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys : [];
+    if (!keys.includes(key)) {
+      return { removed: false, remaining: keys.length, masked: maskApiKey(key) };
+    }
+
+    config.hfApiKeys = keys.filter((k) => k !== key);
+    const usageStore = ensureHfUsageStore();
+    delete usageStore[key];
+    hfUnmanagedRateLimit.delete(key);
+    saveConfig(config);
+    return {
+      removed: true,
+      remaining: config.hfApiKeys.length,
       masked: maskApiKey(key),
     };
   }
@@ -2636,6 +2861,190 @@ function createBot({ loadstringStore } = {}) {
     return ts ? `rate-limited until ${ts}` : 'rate-limited';
   }
 
+  function ensureHfUsageStore() {
+    if (!config.hfKeyUsage || typeof config.hfKeyUsage !== 'object' || Array.isArray(config.hfKeyUsage)) {
+      config.hfKeyUsage = {};
+    }
+    return config.hfKeyUsage;
+  }
+
+  function isManagedHfKey(keyRaw = '') {
+    const key = String(keyRaw || '').trim();
+    if (!key) return false;
+    const keys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys : [];
+    return keys.includes(key);
+  }
+
+  function readHfUsageStats(keyRaw = '') {
+    const key = String(keyRaw || '').trim();
+    const raw = ensureHfUsageStore()?.[key];
+    return {
+      total: normalizeUsageCount(raw?.total),
+      success: normalizeUsageCount(raw?.success),
+      failed: normalizeUsageCount(raw?.failed),
+      chat: normalizeUsageCount(raw?.chat),
+      imageCaption: normalizeUsageCount(raw?.imageCaption),
+      imageOcr: normalizeUsageCount(raw?.imageOcr),
+      lastUsedAt: normalizeUsageCount(raw?.lastUsedAt),
+      lastSuccessAt: normalizeUsageCount(raw?.lastSuccessAt),
+      lastFailureAt: normalizeUsageCount(raw?.lastFailureAt),
+      lastError: String(raw?.lastError || '').trim(),
+      blockedUntilAt: normalizeUsageCount(raw?.blockedUntilAt),
+      last429At: normalizeUsageCount(raw?.last429At),
+      lastRetryAfterMs: normalizeUsageCount(raw?.lastRetryAfterMs),
+    };
+  }
+
+  function ensureHfUsageRecord(keyRaw = '') {
+    const key = String(keyRaw || '').trim();
+    if (!key) return null;
+    const store = ensureHfUsageStore();
+    const current = readHfUsageStats(key);
+    store[key] = current;
+    return store[key];
+  }
+
+  function scheduleHfUsageSave() {
+    if (hfUsageSaveTimer) return;
+    hfUsageSaveTimer = setTimeout(() => {
+      hfUsageSaveTimer = null;
+      if (!hfUsageDirty) return;
+      hfUsageDirty = false;
+      saveConfig(config);
+    }, 1500);
+    hfUsageSaveTimer.unref?.();
+  }
+
+  function markHfInferenceUsage(keyRaw = '', { kind = 'chat', ok = true, error = '' } = {}) {
+    const key = String(keyRaw || '').trim();
+    if (!isManagedHfKey(key)) return;
+
+    const record = ensureHfUsageRecord(key);
+    if (!record) return;
+
+    const now = Date.now();
+    record.total += 1;
+    record.lastUsedAt = now;
+    if (kind === 'chat') record.chat += 1;
+    if (kind === 'imageCaption') record.imageCaption += 1;
+    if (kind === 'imageOcr') record.imageOcr += 1;
+
+    if (ok) {
+      record.success += 1;
+      record.lastSuccessAt = now;
+      if (record.blockedUntilAt && record.blockedUntilAt <= now) {
+        record.blockedUntilAt = 0;
+        record.lastRetryAfterMs = 0;
+      }
+    } else {
+      record.failed += 1;
+      record.lastFailureAt = now;
+      const errText = String(error || '').trim();
+      if (errText) record.lastError = errText.slice(0, 220);
+    }
+
+    hfUsageDirty = true;
+    scheduleHfUsageSave();
+  }
+
+  function resolveRetryAfterMs(err) {
+    const direct = Number(err?.retryAfterMs);
+    if (Number.isFinite(direct) && direct > 0) return Math.floor(direct);
+    return parseRetryAfterMsFromText(err?.body || err?.message || '');
+  }
+
+  function markHfKeyRateLimited(keyRaw = '', err) {
+    const key = String(keyRaw || '').trim();
+    const now = Date.now();
+    const retryAfterMs = Math.max(resolveRetryAfterMs(err), GROQ_RATE_LIMIT_FALLBACK_MS);
+    const blockedUntilAt = now + retryAfterMs;
+    if (!isManagedHfKey(key)) {
+      hfUnmanagedRateLimit.set(key, { blockedUntilAt, retryAfterMs, last429At: now });
+      return;
+    }
+    const record = ensureHfUsageRecord(key);
+    if (!record) return;
+    record.last429At = now;
+    record.lastRetryAfterMs = retryAfterMs;
+    record.blockedUntilAt = blockedUntilAt;
+    hfUsageDirty = true;
+    scheduleHfUsageSave();
+  }
+
+  function clearHfKeyRateLimitIfExpired(keyRaw = '') {
+    const key = String(keyRaw || '').trim();
+    const now = Date.now();
+    if (!isManagedHfKey(key)) {
+      const unmanaged = hfUnmanagedRateLimit.get(key);
+      if (unmanaged?.blockedUntilAt && unmanaged.blockedUntilAt <= now) {
+        hfUnmanagedRateLimit.delete(key);
+      }
+      return;
+    }
+    const record = ensureHfUsageRecord(key);
+    if (!record) return;
+    if (record.blockedUntilAt && record.blockedUntilAt <= now) {
+      record.blockedUntilAt = 0;
+      record.lastRetryAfterMs = 0;
+      hfUsageDirty = true;
+      scheduleHfUsageSave();
+    }
+  }
+
+  function isHfKeyAvailableNow(keyRaw = '', now = Date.now()) {
+    const key = String(keyRaw || '').trim();
+    if (!isManagedHfKey(key)) {
+      const unmanaged = hfUnmanagedRateLimit.get(key);
+      if (!unmanaged?.blockedUntilAt) return true;
+      return unmanaged.blockedUntilAt <= now;
+    }
+    const stats = readHfUsageStats(key);
+    if (!stats.blockedUntilAt) return true;
+    return stats.blockedUntilAt <= now;
+  }
+
+  function getHfKeyPoolWithAvailability(keys = []) {
+    const now = Date.now();
+    const available = [];
+    const cooling = [];
+    for (const key of keys) {
+      const k = String(key || '').trim();
+      if (!k) continue;
+      clearHfKeyRateLimitIfExpired(k);
+      const blockedUntilAt = isManagedHfKey(k)
+        ? Number(readHfUsageStats(k).blockedUntilAt) || 0
+        : Number(hfUnmanagedRateLimit.get(k)?.blockedUntilAt) || 0;
+      if (!blockedUntilAt || isHfKeyAvailableNow(k, now)) {
+        available.push(k);
+      } else {
+        cooling.push({ key: k, blockedUntilAt });
+      }
+    }
+    cooling.sort((a, b) => a.blockedUntilAt - b.blockedUntilAt);
+    return { available, cooling };
+  }
+
+  function buildAllHfKeysCoolingError(cooling = []) {
+    const first = Array.isArray(cooling) && cooling.length > 0 ? cooling[0] : null;
+    const retryAfterMs = first
+      ? Math.max(0, Number(first.blockedUntilAt || 0) - Date.now())
+      : GROQ_RATE_LIMIT_FALLBACK_MS;
+    const err = new Error('All Hugging Face keys are temporarily rate-limited');
+    err.code = 'HF_KEYS_RATE_LIMITED';
+    err.status = 429;
+    err.retryAfterMs = retryAfterMs;
+    err.retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+    return err;
+  }
+
+  function formatHfKeyAvailability(stats = {}) {
+    const blockedUntilAt = Number(stats?.blockedUntilAt || 0);
+    if (!blockedUntilAt) return 'ready';
+    if (blockedUntilAt <= Date.now()) return 'ready';
+    const ts = formatAvailabilityTimestamp(blockedUntilAt);
+    return ts ? `rate-limited until ${ts}` : 'rate-limited';
+  }
+
   function buildApiListPanelComponents({ panelId, page, totalPages }) {
     if (totalPages <= 1) return [];
 
@@ -2658,7 +3067,7 @@ function createBot({ loadstringStore } = {}) {
     ];
   }
 
-  function buildApiListPagePayload({ entries = [], page = 1, panelId }) {
+  function buildApiListPagePayload({ entries = [], page = 1, panelId, providerLabel = 'Groq' }) {
     const total = entries.length;
     const totalPages = Math.max(1, Math.ceil(total / API_LIST_PAGE_SIZE));
     const safePage = Math.min(Math.max(Number(page) || 1, 1), totalPages);
@@ -2680,7 +3089,7 @@ function createBot({ loadstringStore } = {}) {
       embeds: [
         {
           color: 0x5865f2,
-          title: 'Groq API Keys - Inference Usage',
+          title: `${providerLabel} API Keys - Inference Usage`,
           description: [
             '----------------------------------------',
             'Managed key inventory with cumulative usage counters.',
@@ -2795,6 +3204,98 @@ function createBot({ loadstringStore } = {}) {
     }
     const legacyModel = normalizeGroqModelId(config.groqChatModel || DEFAULT_GROQ_MODEL);
     return legacyModel ? [legacyModel] : [DEFAULT_GROQ_MODEL];
+  }
+
+  function getHfKeyPool() {
+    const managed = Array.isArray(config.hfApiKeys) ? config.hfApiKeys.filter(Boolean) : [];
+    const pool = managed.length > 0 ? managed : [HUGGINGFACE_API_KEY];
+    return pool.filter(Boolean);
+  }
+
+  function normalizeHfModelId(value) {
+    return String(value || '').trim();
+  }
+
+  function readCachedHfModels() {
+    const cache = config.hfModelCache && typeof config.hfModelCache === 'object'
+      ? config.hfModelCache
+      : { fetchedAt: 0, models: [] };
+    const fetchedAt = Number(cache.fetchedAt);
+    const models = Array.isArray(cache.models)
+      ? cache.models.map((m) => normalizeHfModelId(m)).filter(Boolean)
+      : [];
+    return {
+      fetchedAt: Number.isFinite(fetchedAt) ? fetchedAt : 0,
+      models,
+    };
+  }
+
+  function writeCachedHfModels(models = []) {
+    const normalized = [...new Set(models.map((m) => normalizeHfModelId(m)).filter(Boolean))];
+    config.hfModelCache = {
+      fetchedAt: Date.now(),
+      models: normalized,
+    };
+    saveConfig(config);
+    return normalized;
+  }
+
+  async function fetchAvailableHfModels({ forceRefresh = false } = {}) {
+    const cache = readCachedHfModels();
+    const isCacheFresh = Date.now() - cache.fetchedAt <= HF_MODEL_CACHE_TTL_MS;
+    if (!forceRefresh && isCacheFresh && cache.models.length > 0) {
+      return { models: cache.models, source: 'cache', stale: false };
+    }
+
+    const keyPool = getHfKeyPool();
+    const { available, cooling } = getHfKeyPoolWithAvailability(keyPool);
+    let lastErr = null;
+    if (available.length === 0 && cooling.length > 0) {
+      lastErr = buildAllHfKeysCoolingError(cooling);
+    }
+    for (const key of available) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const models = await listHuggingFaceModels({ apiKey: key, limit: 80, pipelineTag: 'text-generation' });
+        clearHfKeyRateLimitIfExpired(key);
+        const ids = [...new Set(models.map((m) => normalizeHfModelId(m)).filter(Boolean))];
+        const stored = writeCachedHfModels(ids);
+        return { models: stored, source: 'api', stale: false };
+      } catch (e) {
+        if (Number(e?.status) === 429) {
+          markHfKeyRateLimited(key, e);
+        }
+        lastErr = e;
+      }
+    }
+
+    if (cache.models.length > 0) {
+      return { models: cache.models, source: 'cache', stale: true, error: lastErr };
+    }
+    return { models: [], source: 'none', stale: true, error: lastErr };
+  }
+
+  function resolveHfChatModels() {
+    const runtimeModel = RUNTIME_HUGGINGFACE_CHAT_MODEL;
+    if (runtimeModel) {
+      return [normalizeHfModelId(runtimeModel)].filter(Boolean);
+    }
+    if (Array.isArray(config.hfChatModels) && config.hfChatModels.length > 0) {
+      return config.hfChatModels.map((m) => normalizeHfModelId(m)).filter(Boolean);
+    }
+    const legacyModel = normalizeHfModelId(config.hfChatModel || DEFAULT_HF_MODEL);
+    return legacyModel ? [legacyModel] : [DEFAULT_HF_MODEL];
+  }
+
+  function resolveInferenceProviders() {
+    const configured = Array.isArray(config.aiInferenceProviders)
+      ? config.aiInferenceProviders
+        .map((v) => String(v || '').trim().toLowerCase())
+        .filter((v) => v === 'groq' || v === 'huggingface')
+      : [];
+    const deduped = [...new Set(configured)];
+    if (deduped.length === 2) return deduped;
+    return ['groq', 'huggingface'];
   }
 
   const client = new Client({
@@ -3893,11 +4394,34 @@ function applyGroqProviders(modelIds) {
   return { models };
 }
 
+function applyHfProviders(modelIds) {
+  const models = (Array.isArray(modelIds) ? modelIds : [modelIds])
+    .map((m) => normalizeHfModelId(m))
+    .filter(Boolean);
+  if (models.length === 0) return null;
+  config.hfChatModel = models[0];
+  config.hfChatModels = models;
+  saveConfig(config);
+  return { models };
+}
+
+function applyPrimeProviders(providerIds) {
+  const providers = (Array.isArray(providerIds) ? providerIds : [providerIds])
+    .map((v) => String(v || '').trim().toLowerCase())
+    .filter((v) => v === 'groq' || v === 'huggingface');
+  const deduped = [...new Set(providers)];
+  if (deduped.length !== 2) return null;
+  config.aiInferenceProviders = deduped;
+  saveConfig(config);
+  return { providers: deduped };
+}
+
   async function handleAiChat(message, context = {}) {
     // Allow either env var key or a managed key list.
     // If both exist, we prefer the managed list.
     const groqKeys = Array.isArray(config.groqApiKeys) ? config.groqApiKeys.filter(Boolean) : [];
-    if (!GROQ_API_KEY && groqKeys.length === 0) return;
+    const hfKeys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys.filter(Boolean) : [];
+    if (!GROQ_API_KEY && groqKeys.length === 0 && !HUGGINGFACE_API_KEY && hfKeys.length === 0) return;
     if (!message.channel?.isTextBased?.()) return;
     const isGuildContext = !!message.guild;
 
@@ -3995,7 +4519,9 @@ function applyGroqProviders(modelIds) {
         }
       }
 
-      const rawKeyPoolForImages = (groqKeys.length > 0 ? groqKeys : [GROQ_API_KEY]).filter(Boolean);
+      const inferenceProviders = resolveInferenceProviders();
+      const rawGroqKeyPool = (groqKeys.length > 0 ? groqKeys : [GROQ_API_KEY]).filter(Boolean);
+      const rawHfKeyPool = (hfKeys.length > 0 ? hfKeys : [HUGGINGFACE_API_KEY]).filter(Boolean);
 
       const webQuery = extractWebSearchQuery(message.content || '');
       let webResults = [];
@@ -4035,108 +4561,170 @@ function applyGroqProviders(modelIds) {
     }
 
     async function analyzeImage(attachment) {
-      if (!allowAttachments || !rawKeyPoolForImages.length) return { caption: '', ocrText: '' };
-      const { available: keyPoolForImages } = getGroqKeyPoolWithAvailability(rawKeyPoolForImages);
-      if (!keyPoolForImages.length) return { caption: '', ocrText: '' };
+      if (!allowAttachments) return { caption: '', ocrText: '' };
       const size = Number(attachment?.size || 0);
       if (size && size > MAX_IMAGE_ATTACHMENT_BYTES) return { caption: '', ocrText: '' };
 
       const buf = await fetchAttachmentBuffer(attachment);
       if (!buf) return { caption: '', ocrText: '' };
 
-      const imageModel = String(RUNTIME_GROQ_VISION_MODEL || DEFAULT_GROQ_VISION_MODEL).trim();
-      const ocrModel = String(RUNTIME_GROQ_VISION_MODEL || DEFAULT_GROQ_VISION_MODEL).trim();
       const imageName = stripControlChars(attachment?.name || 'image') || 'image';
-      for (const key of keyPoolForImages) {
-        const maskedKey = maskApiKey(key);
-        const [captionResult, ocrResult] = await Promise.allSettled([
-          withTimeout(
-            groqImageCaption({
-              apiKey: key,
-              imageBuffer: buf,
-              imageMimeType: attachment?.contentType || 'image/jpeg',
-              model: imageModel,
-              timeoutMs: IMAGE_ANALYSIS_TIMEOUT_MS,
-            }),
-            IMAGE_ANALYSIS_TIMEOUT_MS,
-            'image caption timeout'
-          ),
-          withTimeout(
-            groqImageOcr({
-              apiKey: key,
-              imageBuffer: buf,
-              imageMimeType: attachment?.contentType || 'image/jpeg',
-              model: ocrModel,
-              timeoutMs: IMAGE_ANALYSIS_TIMEOUT_MS,
-            }),
-            IMAGE_ANALYSIS_TIMEOUT_MS,
-            'image ocr timeout'
-          ),
-        ]);
-        const caption = captionResult.status === 'fulfilled' ? String(captionResult.value || '') : '';
-        const ocrText = ocrResult.status === 'fulfilled' ? String(ocrResult.value || '') : '';
-        if (captionResult.status === 'rejected') {
-          const captionErr = summarizeErr(captionResult.reason);
-          markGroqInferenceUsage(key, {
-            kind: 'imageCaption',
-            ok: false,
-            error: captionErr,
-          });
-          if (isGroqRateLimitError(captionResult.reason)) {
-            markGroqKeyRateLimited(key, captionResult.reason);
+      const imageMimeType = attachment?.contentType || 'image/jpeg';
+
+      async function tryGroqVision() {
+        const { available: keyPoolForImages } = getGroqKeyPoolWithAvailability(rawGroqKeyPool);
+        if (!keyPoolForImages.length) return null;
+        const imageModel = String(RUNTIME_GROQ_VISION_MODEL || DEFAULT_GROQ_VISION_MODEL).trim();
+        const ocrModel = String(RUNTIME_GROQ_VISION_MODEL || DEFAULT_GROQ_VISION_MODEL).trim();
+        for (const key of keyPoolForImages) {
+          const maskedKey = maskApiKey(key);
+          const [captionResult, ocrResult] = await Promise.allSettled([
+            withTimeout(
+              groqImageCaption({
+                apiKey: key,
+                imageBuffer: buf,
+                imageMimeType,
+                model: imageModel,
+                timeoutMs: IMAGE_ANALYSIS_TIMEOUT_MS,
+              }),
+              IMAGE_ANALYSIS_TIMEOUT_MS,
+              'image caption timeout'
+            ),
+            withTimeout(
+              groqImageOcr({
+                apiKey: key,
+                imageBuffer: buf,
+                imageMimeType,
+                model: ocrModel,
+                timeoutMs: IMAGE_ANALYSIS_TIMEOUT_MS,
+              }),
+              IMAGE_ANALYSIS_TIMEOUT_MS,
+              'image ocr timeout'
+            ),
+          ]);
+          const caption = captionResult.status === 'fulfilled' ? String(captionResult.value || '') : '';
+          const ocrText = ocrResult.status === 'fulfilled' ? String(ocrResult.value || '') : '';
+          if (captionResult.status === 'rejected') {
+            const captionErr = summarizeErr(captionResult.reason);
+            markGroqInferenceUsage(key, { kind: 'imageCaption', ok: false, error: captionErr });
+            if (isGroqRateLimitError(captionResult.reason)) {
+              markGroqKeyRateLimited(key, captionResult.reason);
+            }
+            console.error(`[ai-media] caption failed for ${imageName} via ${imageModel} (${maskedKey}):`, captionErr);
+          } else {
+            markGroqInferenceUsage(key, { kind: 'imageCaption', ok: true });
+            clearGroqKeyRateLimitIfExpired(key);
           }
-          console.error(
-            `[ai-media] caption failed for ${imageName} via ${imageModel} (${maskedKey}):`,
-            captionErr
-          );
-        } else {
-          markGroqInferenceUsage(key, { kind: 'imageCaption', ok: true });
-          clearGroqKeyRateLimitIfExpired(key);
-        }
-        if (ocrResult.status === 'rejected') {
-          const ocrErr = summarizeErr(ocrResult.reason);
-          markGroqInferenceUsage(key, {
-            kind: 'imageOcr',
-            ok: false,
-            error: ocrErr,
-          });
-          if (isGroqRateLimitError(ocrResult.reason)) {
-            markGroqKeyRateLimited(key, ocrResult.reason);
+          if (ocrResult.status === 'rejected') {
+            const ocrErr = summarizeErr(ocrResult.reason);
+            markGroqInferenceUsage(key, { kind: 'imageOcr', ok: false, error: ocrErr });
+            if (isGroqRateLimitError(ocrResult.reason)) {
+              markGroqKeyRateLimited(key, ocrResult.reason);
+            }
+            console.error(`[ai-media] ocr failed for ${imageName} via ${ocrModel} (${maskedKey}):`, ocrErr);
+          } else {
+            markGroqInferenceUsage(key, { kind: 'imageOcr', ok: true });
+            clearGroqKeyRateLimitIfExpired(key);
           }
-          console.error(
-            `[ai-media] ocr failed for ${imageName} via ${ocrModel} (${maskedKey}):`,
-            ocrErr
-          );
-        } else {
-          markGroqInferenceUsage(key, { kind: 'imageOcr', ok: true });
-          clearGroqKeyRateLimitIfExpired(key);
-        }
-        const restrictedErr = (
-          captionResult.status === 'rejected' && (isGroqOrganizationRestrictedError(captionResult.reason) || isGroqServiceUnavailableError(captionResult.reason))
-        )
-          ? captionResult.reason
-          : (
-            ocrResult.status === 'rejected' && (isGroqOrganizationRestrictedError(ocrResult.reason) || isGroqServiceUnavailableError(ocrResult.reason))
+          const restrictedErr = (
+            captionResult.status === 'rejected' && (isGroqOrganizationRestrictedError(captionResult.reason) || isGroqServiceUnavailableError(captionResult.reason))
           )
-            ? ocrResult.reason
-            : null;
-        if (restrictedErr) {
-          await handleGroqRestrictedKey({
-            keyRaw: key,
-            guild: message.guild,
-            context: 'ai-media',
-          });
-          continue;
+            ? captionResult.reason
+            : (
+              ocrResult.status === 'rejected' && (isGroqOrganizationRestrictedError(ocrResult.reason) || isGroqServiceUnavailableError(ocrResult.reason))
+            )
+              ? ocrResult.reason
+              : null;
+          if (restrictedErr) {
+            await handleGroqRestrictedKey({
+              keyRaw: key,
+              guild: message.guild,
+              context: 'ai-media',
+            });
+            continue;
+          }
+          if (caption || ocrText) {
+            return {
+              caption: stripOutputControlChars(caption || ''),
+              ocrText: stripOutputControlChars(ocrText || ''),
+            };
+          }
         }
-        if (caption || ocrText) {
-          return {
-            caption: stripOutputControlChars(caption || ''),
-            ocrText: stripOutputControlChars(ocrText || ''),
-          };
+        return null;
+      }
+
+      async function tryHfVision() {
+        const { available: keyPoolForImages } = getHfKeyPoolWithAvailability(rawHfKeyPool);
+        if (!keyPoolForImages.length) return null;
+        const imageModel = String(RUNTIME_HUGGINGFACE_VISION_MODEL || DEFAULT_HF_VISION_MODEL).trim();
+        const ocrModel = String(RUNTIME_HUGGINGFACE_VISION_MODEL || DEFAULT_HF_VISION_MODEL).trim();
+        for (const key of keyPoolForImages) {
+          const maskedKey = maskApiKey(key);
+          const [captionResult, ocrResult] = await Promise.allSettled([
+            withTimeout(
+              huggingfaceImageCaption({
+                apiKey: key,
+                imageBuffer: buf,
+                imageMimeType,
+                model: imageModel,
+                timeoutMs: IMAGE_ANALYSIS_TIMEOUT_MS,
+              }),
+              IMAGE_ANALYSIS_TIMEOUT_MS,
+              'image caption timeout'
+            ),
+            withTimeout(
+              huggingfaceImageOcr({
+                apiKey: key,
+                imageBuffer: buf,
+                imageMimeType,
+                model: ocrModel,
+                timeoutMs: IMAGE_ANALYSIS_TIMEOUT_MS,
+              }),
+              IMAGE_ANALYSIS_TIMEOUT_MS,
+              'image ocr timeout'
+            ),
+          ]);
+          const caption = captionResult.status === 'fulfilled' ? String(captionResult.value || '') : '';
+          const ocrText = ocrResult.status === 'fulfilled' ? String(ocrResult.value || '') : '';
+          if (captionResult.status === 'rejected') {
+            const captionErr = summarizeErr(captionResult.reason);
+            markHfInferenceUsage(key, { kind: 'imageCaption', ok: false, error: captionErr });
+            if (Number(captionResult.reason?.status) === 429) {
+              markHfKeyRateLimited(key, captionResult.reason);
+            }
+            console.error(`[ai-media] hf caption failed for ${imageName} via ${imageModel} (${maskedKey}):`, captionErr);
+          } else {
+            markHfInferenceUsage(key, { kind: 'imageCaption', ok: true });
+            clearHfKeyRateLimitIfExpired(key);
+          }
+          if (ocrResult.status === 'rejected') {
+            const ocrErr = summarizeErr(ocrResult.reason);
+            markHfInferenceUsage(key, { kind: 'imageOcr', ok: false, error: ocrErr });
+            if (Number(ocrResult.reason?.status) === 429) {
+              markHfKeyRateLimited(key, ocrResult.reason);
+            }
+            console.error(`[ai-media] hf ocr failed for ${imageName} via ${ocrModel} (${maskedKey}):`, ocrErr);
+          } else {
+            markHfInferenceUsage(key, { kind: 'imageOcr', ok: true });
+            clearHfKeyRateLimitIfExpired(key);
+          }
+          if (caption || ocrText) {
+            return {
+              caption: stripOutputControlChars(caption || ''),
+              ocrText: stripOutputControlChars(ocrText || ''),
+            };
+          }
         }
-        console.error(
-          `[ai-media] no caption/ocr text produced for ${imageName} using key ${maskedKey} (models: ${imageModel}, ${ocrModel})`
-        );
+        return null;
+      }
+
+      for (const provider of inferenceProviders) {
+        const result = provider === 'groq'
+          ? await tryGroqVision()
+          : await tryHfVision();
+        if (result && (result.caption || result.ocrText)) {
+          return result;
+        }
       }
 
       return { caption: '', ocrText: '' };
@@ -4290,8 +4878,8 @@ function applyGroqProviders(modelIds) {
       .reverse();
 
     let randomContextMessages = [];
-    const shouldUseDmRandomContext = !isGuildContext && context.isRandomTrigger;
-    if (shouldUseDmRandomContext) {
+    const shouldUseRandomContext = !!context.isRandomTrigger;
+    if (shouldUseRandomContext) {
       const recentMessages = await fetchRecentChannelMessages(message, MAX_RANDOM_CONTEXT_SCAN).catch(() => []);
       randomContextMessages = selectAdaptiveFallbackContext(recentMessages, message, {
         minKeep: MIN_RANDOM_CONTEXT_KEEP,
@@ -4300,12 +4888,12 @@ function applyGroqProviders(modelIds) {
       });
     }
 
-    const contextMessages = shouldUseDmRandomContext
+    const contextMessages = shouldUseRandomContext
       ? randomContextMessages
       : replyContextMessages.length > 0
         ? replyContextMessages
         : randomContextMessages;
-    const contextLabel = shouldUseDmRandomContext
+    const contextLabel = shouldUseRandomContext
       ? (randomContextMessages.length > 0 ? 'Recent channel context' : '')
       : replyContextMessages.length > 0
         ? 'Chat context'
@@ -4315,7 +4903,11 @@ function applyGroqProviders(modelIds) {
     const contextText = contextMessages.length
       ? contextMessages.map((m) => formatMessageForContext(m)).join('\n\n')
       : '';
-    const threadSignalMessages = shouldUseDmRandomContext ? [] : replyContextMessages;
+    const topicMix = detectContextTopicMix(contextMessages, message);
+    const topicMixLine = contextMessages.length > 0
+      ? `Conversation topic signal: mixed_topics_likely=${topicMix.mixed ? 'yes' : 'no'}`
+      : '';
+    const threadSignalMessages = shouldUseRandomContext ? [] : replyContextMessages;
     const threadParticipants = new Set(
       threadSignalMessages
         .map((m) => String(m?.author?.id || ''))
@@ -4435,6 +5027,7 @@ function applyGroqProviders(modelIds) {
     const metadataBlock =
       `${serverMetaLine}\n${dateTimeMetaLine}\n${attachmentFlag}\n${mediaFlag}\n${triggerFlag}\n${contextAvailabilityLine}` +
       `${threadNewParticipantLine ? `\n${threadNewParticipantLine}` : ''}` +
+      `${topicMixLine ? `\n${topicMixLine}` : ''}` +
       `${randomTriggerNote}` +
       `${executorErrorLine}${attachmentLines}${executorLines}${webLines}${directLines}${memberFactsBlock}${visibleChannelsBlock}`;
 
@@ -4514,17 +5107,18 @@ function applyGroqProviders(modelIds) {
     });
 
     let aiText = '';
-    async function callAiOnce({ system, temperature = 0.9, maxTokens = 420 } = {}) {
-      const rawPool = (groqKeys.length > 0 ? groqKeys : [GROQ_API_KEY]).filter(Boolean);
-      const { available: keyPool, cooling } = getGroqKeyPoolWithAvailability(rawPool);
-      if (keyPool.length === 0 && cooling.length > 0) {
-        throw buildAllGroqKeysCoolingError(cooling);
+    async function callGroqAiOnce({ system, temperature = 0.9, maxTokens = 420 } = {}) {
+      const { available: keyPool, cooling } = getGroqKeyPoolWithAvailability(rawGroqKeyPool);
+      if (keyPool.length === 0) {
+        if (cooling.length > 0) throw buildAllGroqKeysCoolingError(cooling);
+        const err = new Error('no Groq keys available');
+        err.code = 'NO_GROQ_KEYS';
+        throw err;
       }
       let lastErr = null;
       const modelList = resolveGroqChatModels();
 
       for (const key of keyPool) {
-        // Try each model in order (primary first, then alternatives)
         for (const modelName of modelList) {
           try {
             // eslint-disable-next-line no-await-in-loop
@@ -4544,44 +5138,15 @@ function applyGroqProviders(modelIds) {
             markGroqInferenceUsage(key, { kind: 'chat', ok: true });
             clearGroqKeyRateLimitIfExpired(key);
             groqDepletedCounts.delete(key);
-            if (!String(text || '').trim()) {
-              console.error('[ai-chat] Groq returned blank text payload', {
-                guildId: message.guild?.id || '',
-                channelId: message.channel?.id || '',
-                messageId: message.id,
-                model: modelName,
-                key: maskApiKey(key),
-              });
-            }
             return text;
           } catch (e) {
             lastErr = e;
-            markGroqInferenceUsage(key, {
-              kind: 'chat',
-              ok: false,
-              error: summarizeErr(e),
-            });
+            markGroqInferenceUsage(key, { kind: 'chat', ok: false, error: summarizeErr(e) });
             if (isGroqRateLimitError(e)) {
               markGroqKeyRateLimited(key, e);
             }
-            console.error('[ai-chat] Groq call failed', {
-              guildId: message.guild?.id || '',
-              channelId: message.channel?.id || '',
-              messageId: message.id,
-              model: modelName,
-              key: maskApiKey(key),
-              aiTimeout,
-              isLightChat,
-              temperature,
-              status: e?.status || '',
-              code: e?.code || '',
-              finishReason: e?.finishReason || '',
-              error: summarizeErr(e),
-              responsePreview: String(e?.responsePreview || e?.body || '').slice(0, 260),
-              retryAfterMs: Number(e?.retryAfterMs || 0),
-            });
-
             if (isGroqOrganizationRestrictedError(e) || isGroqServiceUnavailableError(e)) {
+              // eslint-disable-next-line no-await-in-loop
               await handleGroqRestrictedKey({
                 keyRaw: key,
                 guild: message.guild,
@@ -4600,49 +5165,103 @@ function applyGroqProviders(modelIds) {
               const remainingInfo = totalKeys ? ` | keys left ${remainingKeys}/${totalKeys}` : '';
 
               if (!groqDepletedGlobalPinged.has(key)) {
+                // eslint-disable-next-line no-await-in-loop
                 const pingedGlobal = await pingCreatorInGlobalLog(client, config, {
                   guild: message.guild,
                   text: `groq api key depleted${masked ? ` (${masked})` : ''}${remainingInfo}`,
                 });
                 if (pingedGlobal) {
                   groqDepletedGlobalPinged.add(key);
-                } else {
-                  console.error(`Global depletion ping not delivered for Groq key ${masked}; will retry.`);
                 }
               }
 
               if (!groqDepletedCreatorNotified.has(key)) {
+                // eslint-disable-next-line no-await-in-loop
                 const notifiedFallback = await notifyCreatorLowCredits(client, { guild: message.guild, keyMasked: masked });
                 if (notifiedFallback) {
                   groqDepletedCreatorNotified.add(key);
-                } else {
-                  console.error(`Fallback depletion alert not delivered for Groq key ${masked}; will retry.`);
                 }
               }
 
-              // After repeated failures, remove depleted managed keys from the pool.
-              if (nextCount >= 3) {
-                if (groqKeys.length > 0) {
-                  const dropped = dropGroqManagedKey(key);
-                  if (dropped.removed) {
-                    groqDepletedCounts.delete(key);
-                    console.error(
-                      `Removed depleted Groq key ${masked} after ${nextCount} errors (${dropped.remaining} keys remain)`
-                    );
-                  }
+              if (nextCount >= 3 && groqKeys.length > 0) {
+                const dropped = dropGroqManagedKey(key);
+                if (dropped.removed) {
+                  groqDepletedCounts.delete(key);
                 }
               }
-
               continue;
             }
 
-            if (isGroqRateLimitError(e)) {
-              continue;
-            }
-
+            if (isGroqRateLimitError(e)) continue;
             groqDepletedCounts.delete(key);
-            // Try next model in the fallback chain
           }
+        }
+      }
+
+      if (lastErr) throw lastErr;
+      return '';
+    }
+
+    async function callHfAiOnce({ system, temperature = 0.9, maxTokens = 420 } = {}) {
+      const { available: keyPool, cooling } = getHfKeyPoolWithAvailability(rawHfKeyPool);
+      if (keyPool.length === 0) {
+        if (cooling.length > 0) throw buildAllHfKeysCoolingError(cooling);
+        const err = new Error('no Hugging Face keys available');
+        err.code = 'NO_HF_KEYS';
+        throw err;
+      }
+      let lastErr = null;
+      const modelList = resolveHfChatModels();
+
+      for (const key of keyPool) {
+        for (const modelName of modelList) {
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            const text = await huggingfaceChatCompletion({
+              apiKey: key,
+              model: modelName,
+              temperature,
+              maxTokens,
+              timeoutMs: aiTimeout,
+              messages: [
+                { role: 'system', content: system },
+                { role: 'user', content: userPayload },
+              ],
+            });
+            markHfInferenceUsage(key, { kind: 'chat', ok: true });
+            clearHfKeyRateLimitIfExpired(key);
+            return text;
+          } catch (e) {
+            lastErr = e;
+            markHfInferenceUsage(key, { kind: 'chat', ok: false, error: summarizeErr(e) });
+            if (Number(e?.status) === 429) {
+              markHfKeyRateLimited(key, e);
+              continue;
+            }
+          }
+        }
+      }
+
+      if (lastErr) throw lastErr;
+      return '';
+    }
+
+    async function callAiOnce({ system, temperature = 0.9, maxTokens = 420 } = {}) {
+      let lastErr = null;
+      for (const provider of inferenceProviders) {
+        try {
+          if (provider === 'groq') {
+            // eslint-disable-next-line no-await-in-loop
+            const text = await callGroqAiOnce({ system, temperature, maxTokens });
+            if (String(text || '').trim()) return text;
+          } else if (provider === 'huggingface') {
+            // eslint-disable-next-line no-await-in-loop
+            const text = await callHfAiOnce({ system, temperature, maxTokens });
+            if (String(text || '').trim()) return text;
+          }
+        } catch (e) {
+          lastErr = e;
+          continue;
         }
       }
 
@@ -5101,12 +5720,19 @@ function applyGroqProviders(modelIds) {
     }, 60_000);
 
     const groqQueuePollMs = Math.max(5000, Number(GROQ_KEY_QUEUE_POLL_MS) || 120_000);
+    const hfQueuePollMs = Math.max(5000, Number(HF_KEY_QUEUE_POLL_MS) || groqQueuePollMs);
     setTimeout(() => {
       pollGroqKeyQueue({ reason: 'startup' });
     }, 2000);
     setInterval(() => {
       pollGroqKeyQueue({ reason: 'interval' });
     }, groqQueuePollMs);
+    setTimeout(() => {
+      pollHfKeyQueue({ reason: 'startup' });
+    }, 2500);
+    setInterval(() => {
+      pollHfKeyQueue({ reason: 'interval' });
+    }, hfQueuePollMs);
 
     // Keep reply-target tracker bounded.
     setInterval(() => {
@@ -5553,6 +6179,46 @@ function applyGroqProviders(modelIds) {
       return;
     }
 
+    if (cmd === 'setprime') {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
+        await safeReply(message, {
+          content: pickRoast(),
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      const input = args.join(' ').trim();
+      const currentProviders = resolveInferenceProviders();
+      if (!input) {
+        await safeReply(message, {
+          content: `usage: \`${prefix}setprime <groq|huggingface>,<groq|huggingface>\`\ncurrent: ${currentProviders.join(' → ')}`,
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      const providers = input
+        .split(',')
+        .map((v) => String(v || '').trim().toLowerCase())
+        .filter(Boolean);
+      const deduped = [...new Set(providers)];
+      if (deduped.length !== 2 || deduped.some((v) => v !== 'groq' && v !== 'huggingface')) {
+        await safeReply(message, {
+          content: `invalid providers. use exactly two: \`${prefix}setprime groq,huggingface\` or \`${prefix}setprime huggingface,groq\``,
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      const applied = applyPrimeProviders(deduped);
+      await safeReply(message, {
+        content: `inference prime set to ${applied.providers.join(' → ')} (primary: ${applied.providers[0]})`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+      return;
+    }
+
     if (cmd === 'addgq') {
       if (!hasCreatorWhitelistAccess(config, message.author.id)) {
         await safeReply(message, {
@@ -5692,6 +6358,7 @@ function applyGroqProviders(modelIds) {
         pendingApiListPanels.set(panelId, {
           ownerId: message.author.id,
           entries,
+          providerLabel: 'Groq',
           createdAt: Date.now(),
         });
 
@@ -5794,6 +6461,204 @@ function applyGroqProviders(modelIds) {
       const res = applyGroqProviders(matchedModels);
       await safeReply(message, {
         content: `models set to ${res.models.join(' → ')} (primary: ${res.models[0]})`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+      return;
+    }
+
+    if (cmd === 'addhf') {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
+        await safeReply(message, { content: pickRoast(), allowedMentions: allowedMentionsSafe() });
+        return;
+      }
+      const key = String(args[0] || '').trim();
+      if (!key) {
+        await safeReply(message, {
+          content: `usage: \`${prefix}addhf <key>\``,
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+      if (!/^hf_[a-zA-Z0-9_-]{16,}$/.test(key)) {
+        await safeReply(message, {
+          content: 'invalid huggingface key format',
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+      const keys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys : [];
+      if (!keys.includes(key)) keys.push(key);
+      config.hfApiKeys = keys;
+      ensureHfUsageRecord(key);
+      saveConfig(config);
+      await safeReply(message, {
+        content: `added hf key ${maskApiKey(key)} (total ${keys.length})`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+      return;
+    }
+
+    if (cmd === 'rmhf') {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
+        await safeReply(message, { content: pickRoast(), allowedMentions: allowedMentionsSafe() });
+        return;
+      }
+      const token = String(args[0] || '').trim();
+      if (!token) {
+        await safeReply(message, {
+          content: `usage: \`${prefix}rmhf <number|key|masked>\``,
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+      const keys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys : [];
+      const index = parseListIndex(token);
+      const matchFromIndex = index > 0 ? keys[index - 1] : '';
+      const match = matchFromIndex || keys.find((k) => k === token) || keys.find((k) => maskApiKey(k) === token);
+      if (!match) {
+        await safeReply(message, {
+          content: index > 0 ? 'key number out of range' : 'key not found',
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+      const removed = dropHfManagedKey(match);
+      await safeReply(message, {
+        content: `removed hf key ${maskApiKey(match)} (total ${removed.remaining})`,
+        allowedMentions: allowedMentionsSafe(),
+      });
+      return;
+    }
+
+    if (cmd === 'lshf') {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
+        await safeReply(message, { content: pickRoast(), allowedMentions: allowedMentionsSafe() });
+        return;
+      }
+      const keys = Array.isArray(config.hfApiKeys) ? config.hfApiKeys : [];
+      const wantsUnmasked = String(args[0] || '').trim().toLowerCase() === 'un';
+      if (wantsUnmasked) {
+        if (!keys.length) {
+          await safeReply(message, { content: 'no hf keys saved', allowedMentions: allowedMentionsSafe() });
+          return;
+        }
+        const lines = [
+          `hf keys (unmasked) | total: ${keys.length}`,
+          '',
+          ...keys.map((k, i) => `${i + 1}. ${k}`),
+        ];
+        const chunks = chunkLines(lines, 1750);
+        try {
+          for (const chunk of chunks) {
+            // eslint-disable-next-line no-await-in-loop
+            await message.author.send({ content: chunk });
+          }
+          await safeReply(message, { content: 'sent unmasked keys to your dms', allowedMentions: allowedMentionsSafe() });
+        } catch {
+          await safeReply(message, {
+            content: 'could not dm you the unmasked keys (enable dms and try again)',
+            allowedMentions: allowedMentionsSafe(),
+          });
+        }
+        return;
+      }
+
+      const entries = keys.map((k) => {
+        clearHfKeyRateLimitIfExpired(k);
+        const stats = readHfUsageStats(k);
+        const lastUsed = formatUsageTimestamp(stats.lastUsedAt);
+        return {
+          masked: maskApiKey(k),
+          stats,
+          lastUsed,
+          availability: formatHfKeyAvailability(stats),
+        };
+      });
+      if (entries.length > 0) {
+        const panelId = crypto.randomBytes(12).toString('hex');
+        pendingApiListPanels.set(panelId, {
+          ownerId: message.author.id,
+          entries,
+          providerLabel: 'Hugging Face',
+          createdAt: Date.now(),
+        });
+        const payload = buildApiListPagePayload({
+          entries,
+          page: 1,
+          panelId,
+          providerLabel: 'Hugging Face',
+        });
+        const sent = await safeReply(message, { ...payload, allowedMentions: allowedMentionsSafe() });
+        if (!sent) pendingApiListPanels.delete(panelId);
+      } else {
+        await safeReply(message, { content: 'no hf keys saved', allowedMentions: allowedMentionsSafe() });
+      }
+      return;
+    }
+
+    if (cmd === 'lshfmodel') {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
+        await safeReply(message, { content: pickRoast(), allowedMentions: allowedMentionsSafe() });
+        return;
+      }
+      const currentModels = resolveHfChatModels();
+      const modelState = await fetchAvailableHfModels();
+      const modelLines = modelState.models.length
+        ? modelState.models.map((m, i) => `${i + 1}. ${m}`)
+        : ['(no model list available yet)'];
+      const staleLabel = modelState.stale ? ' (stale)' : '';
+      const header = `huggingface models (current: ${currentModels.join(' → ')}) | source: ${modelState.source}${staleLabel}`;
+      const chunks = chunkLines([header, '', ...modelLines], 1750);
+      for (let i = 0; i < chunks.length; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await safeReply(message, { content: chunks[i], allowedMentions: allowedMentionsSafe() });
+      }
+      return;
+    }
+
+    if (cmd === 'sethf') {
+      if (!hasCreatorWhitelistAccess(config, message.author.id)) {
+        await safeReply(message, { content: pickRoast(), allowedMentions: allowedMentionsSafe() });
+        return;
+      }
+      const modelInputRaw = args.join(' ');
+      if (!modelInputRaw || !modelInputRaw.trim()) {
+        const currentModels = resolveHfChatModels();
+        await safeReply(message, {
+          content: `usage: \`${prefix}sethf <primary-model>[,<model2>,<model3>,...]\`\ncurrent: ${currentModels.join(' → ')}`,
+          allowedMentions: allowedMentionsSafe(),
+        });
+        return;
+      }
+
+      const modelInputs = modelInputRaw.split(',').map((s) => s.trim()).filter(Boolean);
+      const modelState = await fetchAvailableHfModels({ forceRefresh: true });
+      const matchedModels = [];
+
+      for (const modelInput of modelInputs) {
+        const normalizedInput = normalizeHfModelId(modelInput);
+        const modelIndex = parseListIndex(normalizedInput);
+        const matchByIndex = modelIndex > 0 ? modelState.models[modelIndex - 1] : '';
+        const match = matchByIndex || modelState.models.find((m) => m.toLowerCase() === normalizedInput.toLowerCase());
+        if (!match) {
+          if (!modelState.models.length) {
+            matchedModels.push(normalizedInput);
+            continue;
+          }
+          await safeReply(message, {
+            content: modelIndex > 0
+              ? `invalid model number "${modelIndex}". run \`${prefix}lshfmodel\` to see available models`
+              : `invalid model "${normalizedInput}". run \`${prefix}lshfmodel\` to see available models`,
+            allowedMentions: allowedMentionsSafe(),
+          });
+          return;
+        }
+        matchedModels.push(match);
+      }
+
+      const res = applyHfProviders(matchedModels);
+      await safeReply(message, {
+        content: `hf models set to ${res.models.join(' → ')} (primary: ${res.models[0]})`,
         allowedMentions: allowedMentionsSafe(),
       });
       return;
@@ -6304,7 +7169,7 @@ function applyGroqProviders(modelIds) {
         const pending = pendingApiListPanels.get(panelId);
 
         if (!pending?.entries || !Array.isArray(pending.entries)) {
-          await interaction.reply({ content: 'This list panel has expired. Run lsgq again.', ephemeral: true }).catch(() => {});
+          await interaction.reply({ content: 'This list panel has expired. Run the list command again.', ephemeral: true }).catch(() => {});
           return;
         }
 
@@ -6315,7 +7180,7 @@ function applyGroqProviders(modelIds) {
 
         if (!pending.createdAt || Date.now() - pending.createdAt > API_LIST_PANEL_TTL_MS) {
           pendingApiListPanels.delete(panelId);
-          await interaction.reply({ content: 'This list panel has expired. Run lsgq again.', ephemeral: true }).catch(() => {});
+          await interaction.reply({ content: 'This list panel has expired. Run the list command again.', ephemeral: true }).catch(() => {});
           return;
         }
 
@@ -6323,6 +7188,7 @@ function applyGroqProviders(modelIds) {
           entries: pending.entries,
           page: Number.isFinite(requestedPage) ? requestedPage : 1,
           panelId,
+          providerLabel: String(pending.providerLabel || 'Groq'),
         });
         await interaction.update(payload).catch(async () => {
           if (!interaction.replied && !interaction.deferred) {
