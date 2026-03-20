@@ -149,7 +149,7 @@ const CREATOR_USER_ID = '777427217490903080';
 const CREATOR_ALERT_GUILD_ID = '1387021291898273842';
 const CREATOR_ALERT_CHANNEL_ID = '1387021963511468073';
 const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
-const DEFAULT_HF_MODEL = 'meta-llama/Llama-3.3-70B-Instruct';
+const DEFAULT_HF_MODEL = 'moonshotai/Kimi-K2.5';
 const BOT_USERNAME_TAG = 'Goose#9289';
 const BOT_INVITE_URL = 'https://discord.com/oauth2/authorize?client_id=803528296590868480&scope=bot&permissions=277025643584';
 const DEFAULT_GROQ_VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';

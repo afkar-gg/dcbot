@@ -4,7 +4,7 @@
   "GROQ_CHAT_MODEL": "",
   "GROQ_VISION_MODEL": "",
   "HUGGINGFACE_API_KEY": "",
-  "HUGGINGFACE_CHAT_MODEL": "meta-llama/Llama-3.3-70B-Instruct",
+  "HUGGINGFACE_CHAT_MODEL": "moonshotai/Kimi-K2.5",
   "HUGGINGFACE_VISION_MODEL": "meta-llama/Llama-3.2-11B-Vision-Instruct",
   "AI_CALL_TIMEOUT_MS": 25000,
   "BOT_TIMEZONE": "Asia/Jakarta",
